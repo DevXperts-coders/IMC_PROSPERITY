@@ -46,6 +46,14 @@ class Logger:
         for listing in listings.values():
             compressed.append([listing.symbol, listing.product, listing.denomination])
         return compressed
+    def compress_order_depths(self, order_depths: dict[Symbol, OrderDepth]) -> dict:
+        compressed = {}
+        for symbol, depth in order_depths.items():
+            compressed[symbol] = {
+                "bids": [[price, volume] for price, volume in depth.buy_orders.items()],
+                "asks": [[price, volume] for price, volume in depth.sell_orders.items()]
+            }
+        return compressed
 
     def compress_orders(self, orders: dict[Symbol, list[Order]]) -> list[list[Any]]:
         compressed = []
