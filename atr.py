@@ -1,49 +1,19 @@
 import json
 from typing import Any, Dict, List
-from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
+from datamodel import Order, OrderDepth, Symbol, Trade, TradingState, ProsperityEncoder
 
 
 # Required Logger for Prosperity Visualizer
 class Logger:
     def __init__(self) -> None:
         self.logs = ""
-        self.max_log_length = 3750
 
     def print(self, *objects: Any, sep: str = " ", end: str = "\n") -> None:
         self.logs += sep.join(map(str, objects)) + end
 
-    def flush(self, state: TradingState, orders: Dict[Symbol, List[Order]], conversions: int, trader_data: str) -> None:
-        base_length = len(
-            self.to_json(
-                [
-                    self.compress_state(state, ""),
-                    self.compress_orders(orders),
-                    conversions,
-                    "",
-                    "",
-                ]
-            )
-        )
-        max_item_length = (self.max_log_length - base_length) // 3
-
-        print(
-            self.to_json(
-                [
-                    self.compress_state(state, ""),
-                    self.compress_orders(orders),
-                    conversions,
-                    "",
-                    self.truncate(self.logs, max_item_length),
-                ]
-            )
-        )
+    def flush(self) -> None:
+        print(self.logs)
         self.logs = ""
-
-    def to_json(self, value: Any) -> str:
-        return json.dumps(value, cls=ProsperityEncoder, separators=(",", ":"))
-
-    def truncate(self, value: str, max_length: int) -> str:
-        return value[: max_length - 3] + "..." if len(value) > max_length else value
 
 
 # Global logger instance
@@ -140,7 +110,7 @@ class Trader:
                         logger.print(f"KELP: Sell {volume} @ {best_bid}, TP @ {target_price}")
 
         # **Ensure logs are formatted correctly**
-        logger.flush(state, result, conversions, "")
+        logger.flush()
         return result, conversions, ""
 
 
