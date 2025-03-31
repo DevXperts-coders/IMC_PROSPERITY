@@ -107,10 +107,30 @@ class Trader:
         self.position = {"RAINFOREST_RESIN": 0, "KELP": 0}
         self.position_limits = {"RAINFOREST_RESIN": 50, "KELP": 50}
         self.kelp_price_history = []
-        self.window_size = 20  # For calculating range and mean
-        self.range_threshold = 5  # Points to determine contraction/expansion
-        self.mean_threshold = 1  # Points for mean-reversion trades
-        self.trade_size = 5  # Smaller size to manage position limits
+        self.short_sma_period = 10  # Short-term moving average
+        self.long_sma_period = 50  # Long-term moving average
+        self.atr_period = 14  # Period for Average True Range
+        self.atr_history = []  # To calculate ATR
+        self.trade_size = 3  # Smaller trade size
+        self.max_position = 30  # Maximum position in either direction
+
+    def calculate_sma(self, prices, period):
+        if len(prices) < period:
+            return None
+        return sum(prices[-period:]) / period
+
+    def calculate_atr(self, high_low_history, period):
+        if len(high_low_history) < period:
+            return None
+        tr_values = []
+        for i in range(1, len(high_low_history)):
+            high = high_low_history[i]
+            low = high_low_history[i-1]
+            tr = abs(high - low)  # Simplified True Range (high - low)
+            tr_values.append(tr)
+        if len(tr_values) < period - 1:
+            return None
+        return sum(tr_values[-period+1:]) / (period - 1)
 
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
         result: dict[Symbol, list[Order]] = {product: [] for product in state.order_depths.keys()}
@@ -119,7 +139,7 @@ class Trader:
         for product in state.position:
             self.position[product] = state.position[product]
 
-        # --- KELP Trading Strategy (Range-Based) ---
+        # --- KELP Trading Strategy (Trend-Following) ---
         if "KELP" in state.order_depths:
             order_depth = state.order_depths["KELP"]
             best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
@@ -131,12 +151,14 @@ class Trader:
             mid_price = (best_bid + best_ask) / 2 if best_bid and best_ask < float("inf") else None
             if mid_price:
                 self.kelp_price_history.append(mid_price)
-                if len(self.kelp_price_history) > 50:  # Keep history manageable
+                self.atr_history.append(mid_price)  # Using mid-price for ATR approximation
+                if len(self.kelp_price_history) > 100:  # Keep history manageable
                     self.kelp_price_history.pop(0)
+                    self.atr_history.pop(0)
 
             # Load trader_data
             trader_data_dict = json.loads(state.traderData) if state.traderData else {}
-            open_trades = trader_data_dict.get("open_trades", [])  # List of open trades
+            open_trades = trader_data_dict.get("open_trades", [])
 
             # Check if any trades closed by comparing positions
             updated_trades = []
@@ -151,69 +173,42 @@ class Trader:
                     updated_trades.append(trade)
             open_trades = updated_trades
 
-            # Calculate range and mean for the last window_size periods
-            if len(self.kelp_price_history) >= self.window_size:
-                recent_prices = self.kelp_price_history[-self.window_size:]
-                price_range = max(recent_prices) - min(recent_prices)
-                mean_price = sum(recent_prices) / self.window_size
-                range_high = max(recent_prices)
-                range_low = min(recent_prices)
+            # Calculate SMAs and ATR
+            short_sma = self.calculate_sma(self.kelp_price_history, self.short_sma_period)
+            long_sma = self.calculate_sma(self.kelp_price_history, self.long_sma_period)
+            atr = self.calculate_atr(self.atr_history, self.atr_period)
 
-                # Determine mode: contraction (mean-reversion) or expansion (breakout)
-                if price_range <= self.range_threshold:
-                    # Mean-Reversion Mode
-                    if mid_price < mean_price - self.mean_threshold and pos + self.trade_size <= limit:
-                        # Buy at best_ask
-                        result["KELP"].append(Order("KELP", best_ask, self.trade_size))
-                        open_trades.append({
-                            "direction": "long",
-                            "entry_price": best_ask,
-                            "quantity": self.trade_size,
-                            "initial_position": pos,
-                            "target_price": best_ask + 2,  # Small profit target
-                            "stop_price": best_ask - 1     # Tight stop loss
-                        })
-                        logger.print(f"KELP: Mean-Reversion Buy {self.trade_size} at {best_ask}, Mean: {mean_price}")
-                    elif mid_price > mean_price + self.mean_threshold and pos - self.trade_size >= -limit:
-                        # Sell at best_bid
-                        result["KELP"].append(Order("KELP", best_bid, -self.trade_size))
-                        open_trades.append({
-                            "direction": "short",
-                            "entry_price": best_bid,
-                            "quantity": self.trade_size,
-                            "initial_position": pos,
-                            "target_price": best_bid - 2,
-                            "stop_price": best_bid + 1
-                        })
-                        logger.print(f"KELP: Mean-Reversion Sell {self.trade_size} at {best_bid}, Mean: {mean_price}")
-                else:
-                    # Breakout Mode
-                    if mid_price > range_high and pos + self.trade_size <= limit:
-                        # Breakout above range: Buy at best_ask
-                        result["KELP"].append(Order("KELP", best_ask, self.trade_size))
-                        open_trades.append({
-                            "direction": "long",
-                            "entry_price": best_ask,
-                            "quantity": self.trade_size,
-                            "initial_position": pos,
-                            "target_price": best_ask + 4,  # Larger profit target
-                            "stop_price": best_ask - 2     # Wider stop loss
-                        })
-                        logger.print(f"KELP: Breakout Buy {self.trade_size} at {best_ask}, Range High: {range_high}")
-                    elif mid_price < range_low and pos - self.trade_size >= -limit:
-                        # Breakout below range: Sell at best_bid
-                        result["KELP"].append(Order("KELP", best_bid, -self.trade_size))
-                        open_trades.append({
-                            "direction": "short",
-                            "entry_price": best_bid,
-                            "quantity": self.trade_size,
-                            "initial_position": pos,
-                            "target_price": best_bid - 4,
-                            "stop_price": best_bid + 2
-                        })
-                        logger.print(f"KELP: Breakout Sell {self.trade_size} at {best_bid}, Range Low: {range_low}")
+            # Trend-Following Logic
+            if short_sma and long_sma and atr:
+                # Uptrend: Short SMA > Long SMA
+                if short_sma > long_sma and pos + self.trade_size <= self.max_position:
+                    # Buy at best_ask
+                    result["KELP"].append(Order("KELP", best_ask, self.trade_size))
+                    open_trades.append({
+                        "direction": "long",
+                        "entry_price": best_ask,
+                        "quantity": self.trade_size,
+                        "initial_position": pos,
+                        "target_price": best_ask + 2 * atr,  # Take-profit at 2x ATR
+                        "stop_price": best_ask - 1.5 * atr   # Stop-loss at 1.5x ATR
+                    })
+                    logger.print(f"KELP: Trend Buy {self.trade_size} at {best_ask}, Short SMA: {short_sma}, Long SMA: {long_sma}")
 
-            # Manage open trades: Place take-profit and stop-loss orders
+                # Downtrend: Short SMA < Long SMA
+                elif short_sma < long_sma and pos - self.trade_size >= -self.max_position:
+                    # Sell at best_bid
+                    result["KELP"].append(Order("KELP", best_bid, -self.trade_size))
+                    open_trades.append({
+                        "direction": "short",
+                        "entry_price": best_bid,
+                        "quantity": self.trade_size,
+                        "initial_position": pos,
+                        "target_price": best_bid - 2 * atr,
+                        "stop_price": best_bid + 1.5 * atr
+                    })
+                    logger.print(f"KELP: Trend Sell {self.trade_size} at {best_bid}, Short SMA: {short_sma}, Long SMA: {long_sma}")
+
+            # Manage open trades: Place take-profit, stop-loss, and trend-reversal orders
             for trade in open_trades:
                 direction = trade["direction"]
                 quantity = trade["quantity"]
@@ -228,6 +223,10 @@ class Trader:
                     if best_bid <= stop_price:
                         result["KELP"].append(Order("KELP", best_bid, -quantity))
                         logger.print(f"KELP: Stop-loss triggered at {best_bid} for long trade")
+                    # Trend reversal: Sell if trend turns down
+                    if short_sma and long_sma and short_sma < long_sma:
+                        result["KELP"].append(Order("KELP", best_bid, -quantity))
+                        logger.print(f"KELP: Trend reversal, closing long at {best_bid}")
                 elif direction == "short":
                     # Take-profit: Buy at target_price
                     result["KELP"].append(Order("KELP", target_price, quantity))
@@ -235,6 +234,10 @@ class Trader:
                     if best_ask >= stop_price:
                         result["KELP"].append(Order("KELP", best_ask, quantity))
                         logger.print(f"KELP: Stop-loss triggered at {best_ask} for short trade")
+                    # Trend reversal: Buy if trend turns up
+                    if short_sma and long_sma and short_sma > long_sma:
+                        result["KELP"].append(Order("KELP", best_ask, quantity))
+                        logger.print(f"KELP: Trend reversal, closing short at {best_ask}")
 
             # Save trader_data
             trader_data = json.dumps({"open_trades": open_trades})
