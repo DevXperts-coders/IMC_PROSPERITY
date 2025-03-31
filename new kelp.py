@@ -1,7 +1,6 @@
 import json
 from typing import Any, Dict, List
-from prosperity import ProsperityEncoder
-from trading_types import TradingState, Symbol, Listing, OrderDepth, Trade, Observation, Order
+from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 
 # Logger boilerplate required for the Prosperity Visualizer
 class Logger:
