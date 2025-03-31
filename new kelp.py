@@ -112,114 +112,115 @@ class Trader:
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
         result: dict[Symbol, list[Order]] = {product: [] for product in state.order_depths.keys()}
         conversions = 0
+        trader_data = ""
 
-    for product in state.position:
-        self.position[product] = state.position[product]
+        for product in state.position:
+            self.position[product] = state.position[product]
 
-    # --- KELP Trading Strategy (Scalping) ---
-    if "KELP" in state.order_depths:
-        order_depth = state.order_depths["KELP"]
-        best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
-        best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float("inf")
-        pos = self.position["KELP"]
-        limit = self.position_limits["KELP"]
+        # --- KELP Trading Strategy (Scalping) ---
+        if "KELP" in state.order_depths:
+            order_depth = state.order_depths["KELP"]
+            best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
+            best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float("inf")
+            pos = self.position["KELP"]
+            limit = self.position_limits["KELP"]
 
-        # Update mid-price history
-        mid_price = (best_bid + best_ask) / 2 if best_bid and best_ask < float("inf") else None
-        if mid_price:
-            self.kelp_price_history.append(mid_price)
-            if len(self.kelp_price_history) > 50:  # Keep history manageable
-                self.kelp_price_history.pop(0)
+            # Update mid-price history
+            mid_price = (best_bid + best_ask) / 2 if best_bid and best_ask < float("inf") else None
+            if mid_price:
+                self.kelp_price_history.append(mid_price)
+                if len(self.kelp_price_history) > 50:  # Keep history manageable
+                    self.kelp_price_history.pop(0)
 
-        # Load trader_data
-        trader_data_dict = json.loads(state.traderData) if state.traderData else {}
-        open_trade = trader_data_dict.get("open_trade", False)
-        direction = trader_data_dict.get("direction", None)
-        entry_price = trader_data_dict.get("entry_price", None)
-        quantity = 10  # Fixed quantity for each trade
+            # Load trader_data
+            trader_data_dict = json.loads(state.traderData) if state.traderData else {}
+            open_trade = trader_data_dict.get("open_trade", False)
+            direction = trader_data_dict.get("direction", None)
+            entry_price = trader_data_dict.get("entry_price", None)
+            quantity = 10  # Fixed quantity for each trade
 
-        # Check if an open trade was filled
-        if open_trade:
-            for trade in state.own_trades.get("KELP", []):
-                if direction == "long" and trade.quantity < 0:  # Sell trade
-                    if trade.price == entry_price + 4 or trade.price <= entry_price - 1:
-                        open_trade = False
-                        logger.print(f"KELP: Long trade closed at {trade.price}")
-                        break
-                elif direction == "short" and trade.quantity > 0:  # Buy trade
-                    if trade.price == entry_price - 4 or trade.price >= entry_price + 1:
-                        open_trade = False
-                        logger.print(f"KELP: Short trade closed at {trade.price}")
-                        break
+            # Check if an open trade was filled
+            if open_trade:
+                for trade in state.own_trades.get("KELP", []):
+                    if direction == "long" and trade.quantity < 0:  # Sell trade
+                        if trade.price == entry_price + 4 or trade.price <= entry_price - 1:
+                            open_trade = False
+                            logger.print(f"KELP: Long trade closed at {trade.price}")
+                            break
+                    elif direction == "short" and trade.quantity > 0:  # Buy trade
+                        if trade.price == entry_price - 4 or trade.price >= entry_price + 1:
+                            open_trade = False
+                            logger.print(f"KELP: Short trade closed at {trade.price}")
+                            break
 
-        # Entry logic: Detect trend and open a position
-        if not open_trade and len(self.kelp_price_history) >= 3:
-            p0, p1, p2 = self.kelp_price_history[-3:]
-            if p2 > p1 > p0 and pos + quantity <= limit:
-                # Upward trend: Buy at best_ask
-                result["KELP"].append(Order("KELP", best_ask, quantity))
-                open_trade = True
-                direction = "long"
-                entry_price = best_ask
-                logger.print(f"KELP: Buying {quantity} at {best_ask} (Uptrend)")
-            elif p2 < p1 < p0 and pos - quantity >= -limit:
-                # Downward trend: Sell at best_bid
-                result["KELP"].append(Order("KELP", best_bid, -quantity))
-                open_trade = True
-                direction = "short"
-                entry_price = best_bid
-                logger.print(f"KELP: Selling {quantity} at {best_bid} (Downtrend)")
-
-        # Exit logic: Place take-profit and stop-loss orders
-        if open_trade:
-            if direction == "long":
-                # Take-profit: Sell at entry_price + 4
-                result["KELP"].append(Order("KELP", entry_price + 4, -quantity))
-                # Stop-loss: Sell at best_bid if price drops too low
-                if best_bid <= entry_price - 1:
-                    result["KELP"].append(Order("KELP", best_bid, -quantity))
-                    logger.print(f"KELP: Stop-loss triggered at {best_bid}")
-            elif direction == "short":
-                # Take-profit: Buy at entry_price - 4
-                result["KELP"].append(Order("KELP", entry_price - 4, quantity))
-                # Stop-loss: Buy at best_ask if price rises too high
-                if best_ask >= entry_price + 1:
+            # Entry logic: Detect trend and open a position
+            if not open_trade and len(self.kelp_price_history) >= 3:
+                p0, p1, p2 = self.kelp_price_history[-3:]
+                if p2 > p1 > p0 and pos + quantity <= limit:
+                    # Upward trend: Buy at best_ask
                     result["KELP"].append(Order("KELP", best_ask, quantity))
-                    logger.print(f"KELP: Stop-loss triggered at {best_ask}")
+                    open_trade = True
+                    direction = "long"
+                    entry_price = best_ask
+                    logger.print(f"KELP: Buying {quantity} at {best_ask} (Uptrend)")
+                elif p2 < p1 < p0 and pos - quantity >= -limit:
+                    # Downward trend: Sell at best_bid
+                    result["KELP"].append(Order("KELP", best_bid, -quantity))
+                    open_trade = True
+                    direction = "short"
+                    entry_price = best_bid
+                    logger.print(f"KELP: Selling {quantity} at {best_bid} (Downtrend)")
 
-        # Save trader_data
-        trader_data = json.dumps({
-            "open_trade": open_trade,
-            "direction": direction,
-            "entry_price": entry_price,
-            "quantity": quantity
-        })
+            # Exit logic: Place take-profit and stop-loss orders
+            if open_trade:
+                if direction == "long":
+                    # Take-profit: Sell at entry_price + 4
+                    result["KELP"].append(Order("KELP", entry_price + 4, -quantity))
+                    # Stop-loss: Sell at best_bid if price drops too low
+                    if best_bid <= entry_price - 1:
+                        result["KELP"].append(Order("KELP", best_bid, -quantity))
+                        logger.print(f"KELP: Stop-loss triggered at {best_bid}")
+                elif direction == "short":
+                    # Take-profit: Buy at entry_price - 4
+                    result["KELP"].append(Order("KELP", entry_price - 4, quantity))
+                    # Stop-loss: Buy at best_ask if price rises too high
+                    if best_ask >= entry_price + 1:
+                        result["KELP"].append(Order("KELP", best_ask, quantity))
+                        logger.print(f"KELP: Stop-loss triggered at {best_ask}")
+
+            # Save trader_data
+            trader_data = json.dumps({
+                "open_trade": open_trade,
+                "direction": direction,
+                "entry_price": entry_price,
+                "quantity": quantity
+            })
 
     # --- RAINFOREST_RESIN Trading Strategy (Unchanged) ---
-    if "RAINFOREST_RESIN" in state.order_depths:
-        order_depth = state.order_depths["RAINFOREST_RESIN"]
-        best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
-        best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float("inf")
-        pos = self.position["RAINFOREST_RESIN"]
-        limit = self.position_limits["RAINFOREST_RESIN"]
+        if "RAINFOREST_RESIN" in state.order_depths:
+            order_depth = state.order_depths["RAINFOREST_RESIN"]
+            best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
+            best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float("inf")
+            pos = self.position["RAINFOREST_RESIN"]
+            limit = self.position_limits["RAINFOREST_RESIN"]
 
-        if best_ask < float("inf") and 9995 <= best_ask <= 10000:
-            available_to_buy = limit + pos
-            if available_to_buy > 0:
-                volume = min(available_to_buy, -sum(order_depth.sell_orders.values()))
-                if volume > 0:
-                    result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_ask, volume))
-                    logger.print(f"RAINFOREST_RESIN: Buy order at {best_ask} for {volume}")
-        if best_bid > 0 and 10000 <= best_bid <= 10005:
-            available_to_sell = limit - pos
-            if available_to_sell > 0:
-                volume = min(available_to_sell, sum(order_depth.buy_orders.values()))
-                if volume > 0:
-                    result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_bid, -volume))
-                    logger.print(f"RAINFOREST_RESIN: Sell order at {best_bid} for {volume}")
+            if best_ask < float("inf") and 9995 <= best_ask <= 10000:
+                available_to_buy = limit + pos
+                if available_to_buy > 0:
+                    volume = min(available_to_buy, -sum(order_depth.sell_orders.values()))
+                    if volume > 0:
+                        result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_ask, volume))
+                        logger.print(f"RAINFOREST_RESIN: Buy order at {best_ask} for {volume}")
+            if best_bid > 0 and 10000 <= best_bid <= 10005:
+                available_to_sell = limit - pos
+                if available_to_sell > 0:
+                    volume = min(available_to_sell, sum(order_depth.buy_orders.values()))
+                    if volume > 0:
+                        result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_bid, -volume))
+                        logger.print(f"RAINFOREST_RESIN: Sell order at {best_bid} for {volume}")
 
-    logger.flush(state, result, conversions, trader_data)
-    return result, conversions, trader_data
+        logger.flush(state, result, conversions, trader_data)
+        return result, conversions, trader_data
 
     def toJSON(self, result: Any) -> str:
         return json.dumps(result, cls=ProsperityEncoder)
