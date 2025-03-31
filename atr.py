@@ -122,10 +122,10 @@ class Trader:
         # Position tracking for each product
         self.position = {"RAINFOREST_RESIN": 0, "KELP": 0}
         self.position_limits = {"RAINFOREST_RESIN": 50, "KELP": 50}
-        # Price history for Kelp for dynamic breakout calculation
+        # Price history for Kelp to calculate moving average
         self.kelp_prices_history: List[float] = []
-        # Volume threshold for breakout trades
-        self.volume_threshold = 20
+        # Window length for moving average (e.g., last 20 prices)
+        self.ma_window = 20
 
     def calculate_mid_price(self, order_depth: OrderDepth) -> float:
         """Calculate the mid price from the order book."""
@@ -139,12 +139,11 @@ class Trader:
             return min(order_depth.sell_orders.keys())
         return None
 
-    def compute_atr(self, prices: List[float]) -> float:
-        """Compute a simple ATR (average true range) from consecutive mid-prices."""
-        if len(prices) < 2:
-            return 0
-        differences = [abs(prices[i] - prices[i - 1]) for i in range(1, len(prices))]
-        return sum(differences) / len(differences)
+    def moving_average(self, prices: List[float]) -> float:
+        """Calculate the simple moving average over the last ma_window prices."""
+        if len(prices) < self.ma_window:
+            return sum(prices) / len(prices)
+        return sum(prices[-self.ma_window:]) / self.ma_window
 
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
         result: dict[Symbol, list[Order]] = {product: [] for product in state.order_depths.keys()}
@@ -181,7 +180,7 @@ class Trader:
                         result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_bid, -volume))
                         logger.print(f"RAINFOREST_RESIN: Sell order at {best_bid} for {volume}")
 
-        # --- Dynamic Breakout Strategy for KELP ---
+        # --- Mean Reversion Scalping Strategy for KELP ---
         if "KELP" in state.order_depths:
             order_depth = state.order_depths["KELP"]
             mid_price = self.calculate_mid_price(order_depth)
@@ -190,48 +189,39 @@ class Trader:
                 self.kelp_prices_history.append(mid_price)
                 if len(self.kelp_prices_history) > 50:
                     self.kelp_prices_history = self.kelp_prices_history[-50:]
-                
-                # Proceed if we have at least 20 data points
-                if len(self.kelp_prices_history) >= 20:
-                    recent_max = max(self.kelp_prices_history)
-                    recent_min = min(self.kelp_prices_history)
-                    atr = self.compute_atr(self.kelp_prices_history)
-                    # Define breakout threshold as a fraction of ATR (e.g., 0.5 * ATR)
-                    breakout_threshold = 0.5 * atr if atr > 0 else 0.5
+
+                # Only proceed if we have enough history to compute a moving average
+                if len(self.kelp_prices_history) >= 5:
+                    ma = self.moving_average(self.kelp_prices_history)
                     pos = self.position["KELP"]
                     limit = self.position_limits["KELP"]
-                    
-                    # Retrieve volumes from order book
-                    volume_buy = -sum(order_depth.sell_orders.values()) if order_depth.sell_orders else 0  # volume available for buying
-                    volume_sell = sum(order_depth.buy_orders.values()) if order_depth.buy_orders else 0  # volume available for selling
-                    
-                    # Upward breakout condition:
-                    if mid_price > (recent_max + breakout_threshold) and volume_buy >= self.volume_threshold:
+
+                    # If price is below the moving average by at least 0.5, consider buying (expecting reversion)
+                    if mid_price < ma - 0.5:
                         available_to_buy = limit + pos
                         if available_to_buy > 0 and order_depth.sell_orders:
                             entry_price = min(order_depth.sell_orders.keys())
-                            target = entry_price + 3  # target profit of 3 points
+                            target = entry_price + 1  # target profit of 1 point
+                            # Only take the trade if the current best bid covers our target profit
                             if order_depth.buy_orders and max(order_depth.buy_orders.keys()) >= target:
-                                exit_price = max(order_depth.buy_orders.keys())
-                                trade_volume = min(available_to_buy, volume_buy)
+                                trade_volume = min(available_to_buy, -sum(order_depth.sell_orders.values()))
                                 if trade_volume > 0:
                                     result["KELP"].append(Order("KELP", entry_price, trade_volume))
-                                    result["KELP"].append(Order("KELP", exit_price, -trade_volume))
-                                    logger.print(f"KELP Up Breakout: Bought at {entry_price} and sold at {exit_price} for {trade_volume}")
-                    
-                    # Downward breakout condition:
-                    if mid_price < (recent_min - breakout_threshold) and volume_sell >= self.volume_threshold:
+                                    result["KELP"].append(Order("KELP", max(order_depth.buy_orders.keys()), -trade_volume))
+                                    logger.print(f"KELP: Mean reversion BUY at {entry_price}, exit at {max(order_depth.buy_orders.keys())} for {trade_volume}")
+
+                    # If price is above the moving average by at least 0.5, consider selling (expecting reversion)
+                    if mid_price > ma + 0.5:
                         available_to_sell = limit - pos
                         if available_to_sell > 0 and order_depth.buy_orders:
                             entry_price = max(order_depth.buy_orders.keys())
-                            target = entry_price - 3  # target profit of 3 points
+                            target = entry_price - 1  # target profit of 1 point
                             if order_depth.sell_orders and min(order_depth.sell_orders.keys()) <= target:
-                                exit_price = min(order_depth.sell_orders.keys())
-                                trade_volume = min(available_to_sell, volume_sell)
+                                trade_volume = min(available_to_sell, sum(order_depth.buy_orders.values()))
                                 if trade_volume > 0:
                                     result["KELP"].append(Order("KELP", entry_price, -trade_volume))
-                                    result["KELP"].append(Order("KELP", exit_price, trade_volume))
-                                    logger.print(f"KELP Down Breakout: Sold at {entry_price} and bought at {exit_price} for {trade_volume}")
+                                    result["KELP"].append(Order("KELP", min(order_depth.sell_orders.keys()), trade_volume))
+                                    logger.print(f"KELP: Mean reversion SELL at {entry_price}, exit at {min(order_depth.sell_orders.keys())} for {trade_volume}")
 
         # Flush logs in the required format before returning
         logger.flush(state, result, conversions, trader_data)
