@@ -107,6 +107,10 @@ class Trader:
         self.position = {"RAINFOREST_RESIN": 0, "KELP": 0}
         self.position_limits = {"RAINFOREST_RESIN": 50, "KELP": 50}
         self.kelp_price_history = []
+        self.window_size = 20  # For calculating range and mean
+        self.range_threshold = 5  # Points to determine contraction/expansion
+        self.mean_threshold = 1  # Points for mean-reversion trades
+        self.trade_size = 5  # Smaller size to manage position limits
 
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
         result: dict[Symbol, list[Order]] = {product: [] for product in state.order_depths.keys()}
@@ -115,7 +119,7 @@ class Trader:
         for product in state.position:
             self.position[product] = state.position[product]
 
-        # --- KELP Trading Strategy (Scalping) ---
+        # --- KELP Trading Strategy (Range-Based) ---
         if "KELP" in state.order_depths:
             order_depth = state.order_depths["KELP"]
             best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
@@ -132,64 +136,108 @@ class Trader:
 
             # Load trader_data
             trader_data_dict = json.loads(state.traderData) if state.traderData else {}
-            open_trade = trader_data_dict.get("open_trade", False)
-            direction = trader_data_dict.get("direction", None)
-            entry_price = trader_data_dict.get("entry_price", None)
-            quantity = trader_data_dict.get("quantity", 10)  # Fixed quantity
-            initial_position = trader_data_dict.get("initial_position", 0)
+            open_trades = trader_data_dict.get("open_trades", [])  # List of open trades
 
-            # Check if trade is still open based on position
-            if open_trade:
+            # Check if any trades closed by comparing positions
+            updated_trades = []
+            for trade in open_trades:
+                direction = trade["direction"]
+                quantity = trade["quantity"]
+                initial_position = trade["initial_position"]
                 expected_position = initial_position + quantity if direction == "long" else initial_position - quantity
                 if pos != expected_position:
-                    open_trade = False
                     logger.print(f"KELP: Trade closed, position updated from {expected_position} to {pos}")
+                else:
+                    updated_trades.append(trade)
+            open_trades = updated_trades
 
-            # Entry logic: Detect trend and open a position
-            if not open_trade and len(self.kelp_price_history) >= 3:
-                p0, p1, p2 = self.kelp_price_history[-3:]
-                if p2 > p1 > p0 and pos + quantity <= limit:
-                    # Upward trend: Buy at best_ask
-                    result["KELP"].append(Order("KELP", best_ask, quantity))
-                    open_trade = True
-                    direction = "long"
-                    entry_price = best_ask
-                    initial_position = pos
-                    logger.print(f"KELP: Buying {quantity} at {best_ask} (Uptrend)")
-                elif p2 < p1 < p0 and pos - quantity >= -limit:
-                    # Downward trend: Sell at best_bid
-                    result["KELP"].append(Order("KELP", best_bid, -quantity))
-                    open_trade = True
-                    direction = "short"
-                    entry_price = best_bid
-                    initial_position = pos
-                    logger.print(f"KELP: Selling {quantity} at {best_bid} (Downtrend)")
+            # Calculate range and mean for the last window_size periods
+            if len(self.kelp_price_history) >= self.window_size:
+                recent_prices = self.kelp_price_history[-self.window_size:]
+                price_range = max(recent_prices) - min(recent_prices)
+                mean_price = sum(recent_prices) / self.window_size
+                range_high = max(recent_prices)
+                range_low = min(recent_prices)
 
-            # Exit logic: Place take-profit and stop-loss orders
-            if open_trade:
+                # Determine mode: contraction (mean-reversion) or expansion (breakout)
+                if price_range <= self.range_threshold:
+                    # Mean-Reversion Mode
+                    if mid_price < mean_price - self.mean_threshold and pos + self.trade_size <= limit:
+                        # Buy at best_ask
+                        result["KELP"].append(Order("KELP", best_ask, self.trade_size))
+                        open_trades.append({
+                            "direction": "long",
+                            "entry_price": best_ask,
+                            "quantity": self.trade_size,
+                            "initial_position": pos,
+                            "target_price": best_ask + 2,  # Small profit target
+                            "stop_price": best_ask - 1     # Tight stop loss
+                        })
+                        logger.print(f"KELP: Mean-Reversion Buy {self.trade_size} at {best_ask}, Mean: {mean_price}")
+                    elif mid_price > mean_price + self.mean_threshold and pos - self.trade_size >= -limit:
+                        # Sell at best_bid
+                        result["KELP"].append(Order("KELP", best_bid, -self.trade_size))
+                        open_trades.append({
+                            "direction": "short",
+                            "entry_price": best_bid,
+                            "quantity": self.trade_size,
+                            "initial_position": pos,
+                            "target_price": best_bid - 2,
+                            "stop_price": best_bid + 1
+                        })
+                        logger.print(f"KELP: Mean-Reversion Sell {self.trade_size} at {best_bid}, Mean: {mean_price}")
+                else:
+                    # Breakout Mode
+                    if mid_price > range_high and pos + self.trade_size <= limit:
+                        # Breakout above range: Buy at best_ask
+                        result["KELP"].append(Order("KELP", best_ask, self.trade_size))
+                        open_trades.append({
+                            "direction": "long",
+                            "entry_price": best_ask,
+                            "quantity": self.trade_size,
+                            "initial_position": pos,
+                            "target_price": best_ask + 4,  # Larger profit target
+                            "stop_price": best_ask - 2     # Wider stop loss
+                        })
+                        logger.print(f"KELP: Breakout Buy {self.trade_size} at {best_ask}, Range High: {range_high}")
+                    elif mid_price < range_low and pos - self.trade_size >= -limit:
+                        # Breakout below range: Sell at best_bid
+                        result["KELP"].append(Order("KELP", best_bid, -self.trade_size))
+                        open_trades.append({
+                            "direction": "short",
+                            "entry_price": best_bid,
+                            "quantity": self.trade_size,
+                            "initial_position": pos,
+                            "target_price": best_bid - 4,
+                            "stop_price": best_bid + 2
+                        })
+                        logger.print(f"KELP: Breakout Sell {self.trade_size} at {best_bid}, Range Low: {range_low}")
+
+            # Manage open trades: Place take-profit and stop-loss orders
+            for trade in open_trades:
+                direction = trade["direction"]
+                quantity = trade["quantity"]
+                entry_price = trade["entry_price"]
+                target_price = trade["target_price"]
+                stop_price = trade["stop_price"]
+
                 if direction == "long":
-                    # Take-profit: Sell at entry_price + 4
-                    result["KELP"].append(Order("KELP", entry_price + 4, -quantity))
-                    # Stop-loss: Sell at best_bid if price drops too low
-                    if best_bid <= entry_price - 1:
+                    # Take-profit: Sell at target_price
+                    result["KELP"].append(Order("KELP", target_price, -quantity))
+                    # Stop-loss: Sell at best_bid if price drops to or below stop_price
+                    if best_bid <= stop_price:
                         result["KELP"].append(Order("KELP", best_bid, -quantity))
-                        logger.print(f"KELP: Stop-loss triggered at {best_bid}")
+                        logger.print(f"KELP: Stop-loss triggered at {best_bid} for long trade")
                 elif direction == "short":
-                    # Take-profit: Buy at entry_price - 4
-                    result["KELP"].append(Order("KELP", entry_price - 4, quantity))
-                    # Stop-loss: Buy at best_ask if price rises too high
-                    if best_ask >= entry_price + 1:
+                    # Take-profit: Buy at target_price
+                    result["KELP"].append(Order("KELP", target_price, quantity))
+                    # Stop-loss: Buy at best_ask if price rises to or above stop_price
+                    if best_ask >= stop_price:
                         result["KELP"].append(Order("KELP", best_ask, quantity))
-                        logger.print(f"KELP: Stop-loss triggered at {best_ask}")
+                        logger.print(f"KELP: Stop-loss triggered at {best_ask} for short trade")
 
             # Save trader_data
-            trader_data = json.dumps({
-                "open_trade": open_trade,
-                "direction": direction,
-                "entry_price": entry_price,
-                "quantity": quantity,
-                "initial_position": initial_position
-            })
+            trader_data = json.dumps({"open_trades": open_trades})
 
         # --- RAINFOREST_RESIN Trading Strategy (Unchanged) ---
         if "RAINFOREST_RESIN" in state.order_depths:
