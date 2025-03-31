@@ -67,6 +67,20 @@ class Logger:
 
     def truncate(self, value: str, max_length: int) -> str:
         return value if len(value) <= max_length else value[: max_length - 3] + "..."
+    def compress_trades(self, trades: dict[Symbol, list[Trade]]) -> dict:
+        compressed = {}
+        for symbol, trade_list in trades.items():
+            compressed[symbol] = [
+                {
+                    "timestamp": trade.timestamp,
+                    "price": trade.price,
+                    "volume": trade.volume,
+                    "buyer": trade.buyer,
+                    "seller": trade.seller
+                }
+                for trade in trade_list
+            ]
+        return compressed
 
 logger = Logger()
 
