@@ -3,7 +3,6 @@ import numpy as np
 from typing import Any, Dict, List
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 
-# Logger boilerplate required for the Prosperity Visualizer
 class Logger:
     def __init__(self) -> None:
         self.logs = []  # Store logs as a list of dictionaries
@@ -20,18 +19,16 @@ class Logger:
 
     def flush(self, state: TradingState, orders: dict[Symbol, list[Order]], conversions: int, trader_data: str) -> None:
         base_length = len(self.to_json([self.compress_state(state, ""), self.compress_orders(orders), conversions, "", []]))
-        
-        # Truncate logs if necessary
         max_item_length = (self.max_log_length - base_length) // 3
         truncated_logs = self.logs[:max_item_length]
         
         print(self.to_json([self.compress_state(state, trader_data), self.compress_orders(orders), conversions, trader_data, truncated_logs]))
-        self.logs = []  # Reset logs after flushing
+        self.logs = []
 
     def compress_state(self, state: TradingState, trader_data: str) -> list[Any]:
         return [
             state.timestamp,
-            trader_data,
+            str(trader_data).strip(),
             self.compress_listings(state.listings),
             self.compress_order_depths(state.order_depths),
             self.compress_trades(state.own_trades),
@@ -50,7 +47,11 @@ class Logger:
         return [[trade.symbol, trade.price, trade.quantity, trade.buyer, trade.seller, trade.timestamp] for arr in trades.values() for trade in arr]
 
     def compress_observations(self, observations: Observation) -> list[Any]:
-        conversion_observations = {product: [observation.bidPrice, observation.askPrice, observation.transportFees, observation.exportTariff, observation.importTariff, observation.sugarPrice, observation.sunlightIndex] for product, observation in observations.conversionObservations.items()}
+        conversion_observations = {product: [
+            observation.bidPrice, observation.askPrice, observation.transportFees,
+            observation.exportTariff, observation.importTariff,
+            observation.sugarPrice, observation.sunlightIndex
+        ] for product, observation in observations.conversionObservations.items()}
         return [observations.plainValueObservations, conversion_observations]
 
     def compress_orders(self, orders: dict[Symbol, list[Order]]) -> list[list[Any]]:
@@ -59,16 +60,14 @@ class Logger:
     def to_json(self, value: Any) -> str:
         return json.dumps(value, cls=ProsperityEncoder, separators=(",", ":"))
 
-# Global logger instance
 logger = Logger()
-
 
 class Trader:
     def __init__(self):
         self.position = {"RAINFOREST_RESIN": 0, "KELP": 0}
         self.position_limits = {"RAINFOREST_RESIN": 50, "KELP": 50}
-        self.kelp_prices = []  # Store KELP prices for Bollinger Bands
-        self.bb_period = 20  # Rolling window period
+        self.kelp_prices = []  
+        self.bb_period = 20  
 
     def calculate_bollinger_bands(self):
         if len(self.kelp_prices) < self.bb_period:
@@ -76,9 +75,7 @@ class Trader:
         prices = np.array(self.kelp_prices[-self.bb_period:])
         sma = np.mean(prices)
         std_dev = np.std(prices)
-        lower_band = sma - (2 * std_dev)
-        upper_band = sma + (2 * std_dev)
-        return lower_band, upper_band
+        return sma - (2 * std_dev), sma + (2 * std_dev)
 
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
         result = {product: [] for product in state.order_depths.keys()}
@@ -102,15 +99,14 @@ class Trader:
                     if volume > 0:
                         result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_ask, volume))
                         logger.print(f"RAINFOREST_RESIN: Buy {volume} @ {best_ask}")
-            
+
             if best_bid > 0 and 10000 <= best_bid <= 10005:
                 available_to_sell = limit - pos
                 if available_to_sell > 0:
                     volume = min(available_to_sell, sum(order_depth.buy_orders.values()))
                     if volume > 0:
                         result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_bid, -volume))
-                        logger.print(f"RAINFOREST_RESIN: Sell order at {best_bid} for {volume}")
-
+                        logger.print(f"RAINFOREST_RESIN: Sell {volume} @ {best_bid}")
 
         if "KELP" in state.order_depths:
             order_depth = state.order_depths["KELP"]
@@ -123,20 +119,12 @@ class Trader:
             if lower_band is not None:
                 pos = self.position["KELP"]
                 limit = self.position_limits["KELP"]
-                
                 if best_ask <= lower_band:
-                    available_to_buy = limit + pos
-                    if available_to_buy > 0:
-                        buy_volume = min(5, available_to_buy)
-                        result["KELP"].append(Order("KELP", best_ask, buy_volume))
-                        logger.print(f"KELP: Buy {buy_volume} @ {best_ask} (Lower BB: {lower_band})")
-                
-                if best_bid > 0 and best_bid >= upper_band:
-                    available_to_sell = limit - pos
-                    if available_to_sell > 0:
-                        sell_volume = min(5, available_to_sell)
-                        result["KELP"].append(Order("KELP", best_bid, -sell_volume))
-                        logger.print(f"KELP: Sell {sell_volume} @ {best_bid} (Upper BB: {upper_band})")
+                    if pos < limit:
+                        result["KELP"].append(Order("KELP", best_ask, 5))
+                if best_bid >= upper_band:
+                    if pos > -limit:
+                        result["KELP"].append(Order("KELP", best_bid, -5))
 
         logger.flush(state, result, conversions, trader_data)
         return result, conversions, trader_data
