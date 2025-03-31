@@ -72,7 +72,8 @@ class Trader:
                     volume = min(available_to_sell, sum(order_depth.buy_orders.values()))
                     if volume > 0:
                         result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_bid, -volume))
-                        logger.print(f"RAINFOREST_RESIN: Sell {volume} @ {best_bid}")
+                        logger.print(json.dumps({"action": "SELL", "product": "RAINFOREST_RESIN", "price": best_bid, "volume": volume}))
+
 
         if "KELP" in state.order_depths:
             order_depth = state.order_depths["KELP"]
