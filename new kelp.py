@@ -147,7 +147,29 @@ class Trader:
                     sell_volume = min(10, pos + limit)
                     result["KELP"].append(Order("KELP", best_bid, -sell_volume))
                     logger.print(f"KELP: Selling {sell_volume} at {best_bid} (Mean: {avg_price})")
+        if "RAINFOREST_RESIN" in state.order_depths:
+            order_depth = state.order_depths["RAINFOREST_RESIN"]
+            best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
+            best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float("inf")
+            pos = self.position["RAINFOREST_RESIN"]
+            limit = self.position_limits["RAINFOREST_RESIN"]
 
+            # Buy if best ask is between 9995 and 10000
+            if best_ask < float("inf") and 9995 <= best_ask <= 10000:
+                available_to_buy = limit + pos
+                if available_to_buy > 0:
+                    volume = min(available_to_buy, -sum(order_depth.sell_orders.values()))
+                    if volume > 0:
+                        result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_ask, volume))
+                        logger.print(f"RAINFOREST_RESIN: Buy order at {best_ask} for {volume}")
+            # Sell if best bid is between 10000 and 10005
+            if best_bid > 0 and 10000 <= best_bid <= 10005:
+                available_to_sell = limit - pos
+                if available_to_sell > 0:
+                    volume = min(available_to_sell, sum(order_depth.buy_orders.values()))
+                    if volume > 0:
+                        result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_bid, -volume))
+                        logger.print(f"RAINFOREST_RESIN: Sell order at {best_bid} for {volume}")
         logger.flush(state, result, conversions, trader_data)
         return result, conversions, trader_data
 
