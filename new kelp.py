@@ -107,8 +107,8 @@ class Trader:
         self.position = {"RAINFOREST_RESIN": 0, "KELP": 0}
         self.position_limits = {"RAINFOREST_RESIN": 50, "KELP": 50}
         self.kelp_price_history = []
-        self.short_sma_period = 10  # Short-term moving average
-        self.long_sma_period = 50  # Long-term moving average
+        self.short_sma_period = 5  # Short-term moving average
+        self.long_sma_period = 20 # Long-term moving average
         self.atr_period = 14  # Period for Average True Range
         self.atr_history = []  # To calculate ATR
         self.trade_size = 3  # Smaller trade size
@@ -178,7 +178,7 @@ class Trader:
             # Calculate SMAs and ATR
             short_sma = self.calculate_sma(self.kelp_price_history, self.short_sma_period)
             long_sma = self.calculate_sma(self.kelp_price_history, self.long_sma_period)
-            atr = self.calculate_atr(self.atr_history, self.atr_period)
+            atr = max(self.calculate_atr(self.atr_history, self.atr_period), 2)  # Ensure ATR is at least 2
 
             # Trend-Following Logic
             if short_sma and long_sma and atr:
@@ -187,8 +187,8 @@ class Trader:
                     # Buy at best_ask
                     result["KELP"].append(Order("KELP", best_ask, self.trade_size))
                     # Ensure target_price and stop_price are integers
-                    target_price = int(best_ask + 2 * atr)  # Take-profit at 2x ATR
-                    stop_price = int(best_ask - 1.5 * atr)  # Stop-loss at 1.5x ATR
+                    target_price = int(best_ask + 4 * atr)  # Take-profit at 4x ATR
+                    stop_price = int(best_ask - 3 * atr)    # Stop-loss at 3x ATR # Stop-loss at 1.5x ATR
                     open_trades.append({
                         "direction": "long",
                         "entry_price": best_ask,
@@ -204,8 +204,8 @@ class Trader:
                     # Sell at best_bid
                     result["KELP"].append(Order("KELP", best_bid, -self.trade_size))
                     # Ensure target_price and stop_price are integers
-                    target_price = int(best_bid - 2 * atr)  # Take-profit at 2x ATR
-                    stop_price = int(best_bid + 1.5 * atr)  # Stop-loss at 1.5x ATR
+                    target_price = int(best_ask + 4 * atr)  # Take-profit at 4x ATR
+                    stop_price = int(best_ask - 3 * atr)    # Stop-loss at 3x ATR  # Stop-loss at 1.5x ATR
                     open_trades.append({
                         "direction": "short",
                         "entry_price": best_bid,
