@@ -23,7 +23,6 @@ class Logger:
                 ]
             )
         )
-        # Truncate state.traderData, trader_data, and logs so total length is within limit
         max_item_length = (self.max_log_length - base_length) // 3
 
         print(
@@ -112,7 +111,6 @@ class Trader:
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
         result: dict[Symbol, list[Order]] = {product: [] for product in state.order_depths.keys()}
         conversions = 0
-        trader_data = ""
 
         for product in state.position:
             self.position[product] = state.position[product]
@@ -137,21 +135,15 @@ class Trader:
             open_trade = trader_data_dict.get("open_trade", False)
             direction = trader_data_dict.get("direction", None)
             entry_price = trader_data_dict.get("entry_price", None)
-            quantity = 10  # Fixed quantity for each trade
+            quantity = trader_data_dict.get("quantity", 10)  # Fixed quantity
+            initial_position = trader_data_dict.get("initial_position", 0)
 
-            # Check if an open trade was filled
+            # Check if trade is still open based on position
             if open_trade:
-                for trade in state.own_trades.get("KELP", []):
-                    if direction == "long" and trade.quantity < 0:  # Sell trade
-                        if trade.price == entry_price + 4 or trade.price <= entry_price - 1:
-                            open_trade = False
-                            logger.print(f"KELP: Long trade closed at {trade.price}")
-                            break
-                    elif direction == "short" and trade.quantity > 0:  # Buy trade
-                        if trade.price == entry_price - 4 or trade.price >= entry_price + 1:
-                            open_trade = False
-                            logger.print(f"KELP: Short trade closed at {trade.price}")
-                            break
+                expected_position = initial_position + quantity if direction == "long" else initial_position - quantity
+                if pos != expected_position:
+                    open_trade = False
+                    logger.print(f"KELP: Trade closed, position updated from {expected_position} to {pos}")
 
             # Entry logic: Detect trend and open a position
             if not open_trade and len(self.kelp_price_history) >= 3:
@@ -162,6 +154,7 @@ class Trader:
                     open_trade = True
                     direction = "long"
                     entry_price = best_ask
+                    initial_position = pos
                     logger.print(f"KELP: Buying {quantity} at {best_ask} (Uptrend)")
                 elif p2 < p1 < p0 and pos - quantity >= -limit:
                     # Downward trend: Sell at best_bid
@@ -169,6 +162,7 @@ class Trader:
                     open_trade = True
                     direction = "short"
                     entry_price = best_bid
+                    initial_position = pos
                     logger.print(f"KELP: Selling {quantity} at {best_bid} (Downtrend)")
 
             # Exit logic: Place take-profit and stop-loss orders
@@ -193,10 +187,11 @@ class Trader:
                 "open_trade": open_trade,
                 "direction": direction,
                 "entry_price": entry_price,
-                "quantity": quantity
+                "quantity": quantity,
+                "initial_position": initial_position
             })
 
-    # --- RAINFOREST_RESIN Trading Strategy (Unchanged) ---
+        # --- RAINFOREST_RESIN Trading Strategy (Unchanged) ---
         if "RAINFOREST_RESIN" in state.order_depths:
             order_depth = state.order_depths["RAINFOREST_RESIN"]
             best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
