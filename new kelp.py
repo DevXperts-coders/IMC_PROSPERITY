@@ -1,4 +1,5 @@
 import json
+import numpy as np
 from typing import Any, Dict, List
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 
