@@ -1,22 +1,26 @@
 import json
 from typing import Any, Dict, List
-from datamodel import Order, OrderDepth, Symbol, Trade, TradingState, ProsperityEncoder
+from datamodel import Order, OrderDepth, Symbol, Trade, TradingState
 
 
-# Required Logger for Prosperity Visualizer
+# ✅ Proper JSON logger
 class Logger:
     def __init__(self) -> None:
-        self.logs = ""
+        self.logs = []
 
-    def print(self, *objects: Any, sep: str = " ", end: str = "\n") -> None:
-        self.logs += sep.join(map(str, objects)) + end
+    def print(self, message: str, **kwargs) -> None:
+        """Store logs in a structured JSON format."""
+        log_entry = {"message": message, **kwargs}
+        self.logs.append(log_entry)
 
     def flush(self) -> None:
-        print(self.logs)
-        self.logs = ""
+        """Print all logs in valid JSON format."""
+        if self.logs:
+            print(json.dumps({"logs": self.logs}))
+            self.logs = []
 
 
-# Global logger instance
+# Create a global logger instance
 logger = Logger()
 
 
@@ -29,15 +33,10 @@ class Trader:
         self.support = None
 
     def calculate_mid_price(self, order_depth: OrderDepth) -> float:
-        """Calculate the mid-price from the order book."""
         if order_depth.buy_orders and order_depth.sell_orders:
             best_bid = max(order_depth.buy_orders.keys(), default=0)
             best_ask = min(order_depth.sell_orders.keys(), default=float("inf"))
             return (best_bid + best_ask) / 2
-        elif order_depth.buy_orders:
-            return max(order_depth.buy_orders.keys())
-        elif order_depth.sell_orders:
-            return min(order_depth.sell_orders.keys())
         return None
 
     def run(self, state: TradingState) -> tuple[Dict[Symbol, List[Order]], int, str]:
@@ -61,16 +60,16 @@ class Trader:
                 volume = min(available_to_buy, -sum(order_depth.sell_orders.values()))
                 if volume > 0:
                     result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_ask, volume))
-                    logger.print(f"RAINFOREST_RESIN: Buy {volume} @ {best_ask}")
+                    logger.print("Buy order placed", product="RAINFOREST_RESIN", price=best_ask, volume=volume)
 
             if best_bid >= 10000 and best_bid <= 10005:
                 available_to_sell = limit + pos
                 volume = min(available_to_sell, sum(order_depth.buy_orders.values()))
                 if volume > 0:
                     result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_bid, -volume))
-                    logger.print(f"RAINFOREST_RESIN: Sell {volume} @ {best_bid}")
+                    logger.print("Sell order placed", product="RAINFOREST_RESIN", price=best_bid, volume=volume)
 
-        # --- KELP SCALPING STRATEGY ---
+        # --- KELP BREAKOUT STRATEGY ---
         if "KELP" in state.order_depths:
             order_depth = state.order_depths["KELP"]
             mid_price = self.calculate_mid_price(order_depth)
@@ -89,7 +88,7 @@ class Trader:
                 self.resistance = max(self.kelp_price_history, default=mid_price) + 5
                 self.support = min(self.kelp_price_history, default=mid_price) - 5
 
-                # **BUY when price near support and enough liquidity**
+                # Buy near support, sell near resistance with 4-point TP
                 if best_ask <= self.support + 3:
                     available_to_buy = limit - pos
                     volume = min(available_to_buy, -sum(order_depth.sell_orders.values()))
@@ -97,9 +96,8 @@ class Trader:
                     if volume > 0 and max(order_depth.buy_orders.keys(), default=0) >= target_price:
                         result["KELP"].append(Order("KELP", best_ask, volume))
                         result["KELP"].append(Order("KELP", target_price, -volume))
-                        logger.print(f"KELP: Buy {volume} @ {best_ask}, TP @ {target_price}")
+                        logger.print("Buy order placed", product="KELP", price=best_ask, volume=volume)
 
-                # **SELL when price near resistance and enough liquidity**
                 if best_bid >= self.resistance - 3:
                     available_to_sell = limit + pos
                     volume = min(available_to_sell, sum(order_depth.buy_orders.values()))
@@ -107,9 +105,9 @@ class Trader:
                     if volume > 0 and min(order_depth.sell_orders.keys(), default=float("inf")) <= target_price:
                         result["KELP"].append(Order("KELP", best_bid, -volume))
                         result["KELP"].append(Order("KELP", target_price, volume))
-                        logger.print(f"KELP: Sell {volume} @ {best_bid}, TP @ {target_price}")
+                        logger.print("Sell order placed", product="KELP", price=best_bid, volume=volume)
 
-        # **Ensure logs are formatted correctly**
+        # ✅ Ensure logs are JSON-formatted
         logger.flush()
         return result, conversions, ""
 
