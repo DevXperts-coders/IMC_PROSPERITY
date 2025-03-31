@@ -1,26 +1,43 @@
 import json
-from typing import Any, Dict, List
-from datamodel import Order, OrderDepth, Symbol, Trade, TradingState
+from typing import Any
+from datamodel import TradingState, Order, Symbol, ProsperityEncoder
 
-
-# ✅ Proper JSON logger
 class Logger:
     def __init__(self) -> None:
-        self.logs = []
+        self.logs = ""
+        self.max_log_length = 3750  # Ensure logs do not exceed limits
 
-    def print(self, message: str, **kwargs) -> None:
-        """Store logs in a plain text format for IMC compatibility."""
-        log_entry = message + " | " + " | ".join(f"{key}: {value}" for key, value in kwargs.items())
-        self.logs.append(log_entry)
+    def print(self, *objects: Any, sep: str = " ", end: str = "\n") -> None:
+        """IMC-Compatible Logging: Capture logs as a single formatted string"""
+        log_entry = sep.join(map(str, objects)) + end
+        self.logs += log_entry
 
-    def flush(self) -> None:
-        """Print logs as plain text for IMC visualizer compatibility."""
-        for log in self.logs:
-            print(log)
-        self.logs = []
+    def flush(self, state: TradingState, orders: dict[Symbol, list[Order]], conversions: int, trader_data: str) -> None:
+        """Flushes logs in the correct JSON format for IMC's visualizer"""
+        
+        log_data = json.dumps(
+            [
+                state.timestamp,
+                self.compress_orders(orders),
+                conversions,
+                trader_data,
+                self.truncate_logs(self.logs),
+            ],
+            cls=ProsperityEncoder,  # Ensure IMC format compatibility
+            separators=(",", ":")  # Minimize space usage
+        )
+        
+        print(log_data)  # Ensure correct format for IMC
+        self.logs = ""  # Reset logs after flushing
 
+    def compress_orders(self, orders: dict[Symbol, list[Order]]) -> list[list[Any]]:
+        """Converts orders to a compact format"""
+        return [[order.symbol, order.price, order.quantity] for symbol_orders in orders.values() for order in symbol_orders]
 
-# Create a global logger instance
+    def truncate_logs(self, logs: str) -> str:
+        """Truncate logs to ensure they fit within the max length"""
+        return logs[: self.max_log_length - 3] + "..." if len(logs) > self.max_log_length else logs
+
 logger = Logger()
 
 
