@@ -9,15 +9,15 @@ class Logger:
         self.logs = []
 
     def print(self, message: str, **kwargs) -> None:
-        """Store logs in a structured JSON format."""
-        log_entry = {"message": message, **kwargs}
+        """Store logs in a plain text format for IMC compatibility."""
+        log_entry = message + " | " + " | ".join(f"{key}: {value}" for key, value in kwargs.items())
         self.logs.append(log_entry)
 
     def flush(self) -> None:
-        """Print all logs in valid JSON format."""
-        if self.logs:
-            print(json.dumps({"logs": self.logs}))
-            self.logs = []
+        """Print logs as plain text for IMC visualizer compatibility."""
+        for log in self.logs:
+            print(log)
+        self.logs = []
 
 
 # Create a global logger instance
