@@ -115,8 +115,8 @@ class Trader:
         self.resin_atr_history = []
         self.atr_period = 14  # Period for Average True Range
         self.mean_period = 20  # Period for long-term mean (mu) in OU
-        self.theta = 0.3  # Increased mean reversion speed
-        self.trade_size = 10  # Base trade size for maximum volume
+        self.theta = 0.4  # Increased mean reversion speed
+        self.trade_size = 15  # Increased base trade size for maximum volume
 
     def calculate_atr(self, high_low_history, period):
         if len(high_low_history) < period:
@@ -168,11 +168,11 @@ class Trader:
                 logger.flush(state, result, conversions, trader_data)
                 return result, conversions, trader_data
             atr = max(atr_raw, 2)
-            base_spread = min(max(1, atr // 2), 5)  # Narrower spread with cap at 5
+            base_spread = max(1, atr // 3)  # Tighter spread for more fills
 
-            # Liquidity check: Halve spread if no trades in 500 timestamps
+            # Liquidity check: Halve spread if no trades in 300 timestamps
             current_timestamp = state.timestamp
-            if current_timestamp - self.last_trade_timestamp > 500 and base_spread > 1:
+            if current_timestamp - self.last_trade_timestamp > 300 and base_spread > 1:
                 base_spread = max(1, base_spread // 2)
                 logger.print(f"KELP: Liquidity check triggered, reduced spread to {base_spread}")
 
@@ -222,7 +222,7 @@ class Trader:
                 return result, conversions, trader_data
             sigma = max(atr_raw, 1)
             fair_price = round(mu + self.theta * (mu - mid_price))
-            spread = max(1, sigma // 2)
+            spread = max(1, sigma // 2)  # Monitor for overtrading, can adjust to sigma // 3
 
             # Calculate bid and ask prices
             bid_price = int(fair_price - spread)
