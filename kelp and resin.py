@@ -99,17 +99,6 @@ class Logger:
     def truncate(self, value: str, max_length: int) -> str:
         return value if len(value) <= max_length else value[: max_length - 3] + "..."
 
-
-logger = Logger()
-
-import json
-from typing import Any, Dict, List
-from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
-
-class Logger:
-    # [Previous Logger implementation remains unchanged]
-    pass
-
 logger = Logger()
 
 class Trader:
@@ -142,7 +131,7 @@ class Trader:
             if trades and i < len(trades):
                 tr = max(tr, abs(price_history[i] - trades[i].price))  # Include price change
             tr_values.append(tr)
-        return round(sum(tr_values[-period:]) / period) if len(tr_values) >= period else None
+        return round(sum(tr_values[-period:]) / period) if len(trades) >= period else None
 
     def calculate_mean(self, price_history, period):
         if len(price_history) < period:
