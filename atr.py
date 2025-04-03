@@ -115,7 +115,7 @@ class Trader:
         self.resin_atr_history = []
         self.atr_period = 14  # Period for Average True Range
         self.mean_period = 20  # Period for long-term mean (mu) in OU
-        self.theta = 0.4  # Increased mean reversion speed
+        self.theta = 0.2  # Increased mean reversion speed
         self.trade_size = 15  # Increased base trade size for maximum volume
 
     def calculate_atr(self, high_low_history, period):
