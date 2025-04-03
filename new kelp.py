@@ -114,9 +114,10 @@ class Trader:
         self.resin_atr_history = []
         self.atr_period = 14  # Period for Average True Range
         self.mean_period = 20  # Period for long-term mean (mu) in OU
-        self.theta = 0.1  # Mean reversion speed (fixed, adjustable)
-        self.trade_size = 3  # Base trade size for market-making
+        self.theta = 0.2  # Mean reversion speed (increased for faster adjustment)
+        self.trade_size = 5  # Increased base trade size for more activity
         self.max_position = 30  # Maximum position in either direction
+        self.momentum_period = 5  # Period for momentum check in KELP
 
     def calculate_atr(self, high_low_history, period):
         if len(high_low_history) < period:
@@ -125,7 +126,7 @@ class Trader:
         for i in range(1, len(high_low_history)):
             high = high_low_history[i]
             low = high_low_history[i-1]
-            tr = abs(high - low)  # Simplified True Range (high - low)
+            tr = abs(high - low)
             tr_values.append(tr)
         if len(tr_values) < period - 1:
             return None
@@ -168,33 +169,47 @@ class Trader:
                 logger.flush(state, result, conversions, trader_data)
                 return result, conversions, trader_data
             atr = max(atr_raw, 2)
-            base_spread = max(2, atr // 2)
+            base_spread = max(3, atr)  # Wider spread to capture more trades
+
+            # Momentum check: Is price trending up or down?
+            momentum = 0
+            if len(self.kelp_mid_price_history) >= self.momentum_period:
+                recent_prices = self.kelp_mid_price_history[-self.momentum_period:]
+                momentum = recent_prices[-1] - recent_prices[0]  # Positive = uptrend, negative = downtrend
+
+            # Adjust spreads based on momentum
+            bid_spread = base_spread
+            ask_spread = base_spread
+            if momentum > 0:  # Uptrend: favor buying
+                bid_spread = max(2, base_spread - 1)  # Tighten bid spread
+                ask_spread = base_spread + 1  # Widen ask spread
+            elif momentum < 0:  # Downtrend: favor selling
+                bid_spread = base_spread + 1  # Widen bid spread
+                ask_spread = max(2, base_spread - 1)  # Tighten ask spread
 
             # Calculate bid and ask prices
-            bid_price = int(mid_price - base_spread) if mid_price else best_bid
-            ask_price = int(mid_price + base_spread) if mid_price else best_ask
+            bid_price = int(mid_price - bid_spread) if mid_price else best_bid
+            ask_price = int(mid_price + ask_spread) if mid_price else best_ask
 
             # Inventory management
             available_to_buy = min(self.max_position - pos, limit - pos)
             available_to_sell = min(self.max_position + pos, limit + pos)
             buy_volume = min(self.trade_size, available_to_buy)
             sell_volume = min(self.trade_size, available_to_sell)
-            if pos > 15:  # Skewed long
+            if pos > 20:  # Skewed long (relaxed threshold)
                 sell_volume = min(self.trade_size * 2, available_to_sell)
                 buy_volume = min(self.trade_size // 2, available_to_buy)
-            elif pos < -15:  # Skewed short
+            elif pos < -20:  # Skew.Concurrent short
                 buy_volume = min(self.trade_size * 2, available_to_buy)
                 sell_volume = min(self.trade_size // 2, available_to_sell)
 
-            # Place orders
-            buy_volume = min(buy_volume, sum([q for p, q in order_depth.buy_orders.items() if p >= bid_price]))
-            sell_volume = min(sell_volume, -sum([q for p, q in order_depth.sell_orders.items() if p <= ask_price]))
+            # Place orders (removed strict depth cap to increase fills)
             if buy_volume > 0 and bid_price > 0:
                 result["KELP"].append(Order("KELP", bid_price, buy_volume))
-                logger.print(f"KELP: Market-making bid at {bid_price} for {buy_volume}, ATR: {atr}, Position: {pos}")
+                logger.print(f"KELP: Market-making bid at {bid_price} for {buy_volume}, ATR: {atr}, Momentum: {momentum}, Position: {pos}")
             if sell_volume > 0 and ask_price < float("inf"):
                 result["KELP"].append(Order("KELP", ask_price, -sell_volume))
-                logger.print(f"KELP: Market-making ask at {ask_price} for {sell_volume}, ATR: {atr}, Position: {pos}")
+                logger.print(f"KELP: Market-making ask at {ask_price} for {sell_volume}, ATR: {atr}, Momentum: {momentum}, Position: {pos}")
 
         # --- RAINFOREST_RESIN Trading Strategy (Market-Making with OU) ---
         if "RAINFOREST_RESIN" in state.order_depths:
@@ -214,17 +229,15 @@ class Trader:
                     self.resin_atr_history.pop(0)
 
             # Calculate OU parameters
-            mu = self.calculate_mean(self.resin_mid_price_history, self.mean_period) or 10000  # Default to 10000 if not enough data
+            mu = self.calculate_mean(self.resin_mid_price_history, self.mean_period) or 10000
             atr_raw = self.calculate_atr(self.resin_atr_history, self.atr_period)
             if atr_raw is None or mid_price is None:
                 trader_data = json.dumps({})
                 logger.flush(state, result, conversions, trader_data)
                 return result, conversions, trader_data
-            sigma = max(atr_raw, 1)  # Minimum volatility of 1 for stable asset
-
-            # Estimate fair price with OU mean-reversion (simplified discrete step)
-            fair_price = round(mu + self.theta * (mu - mid_price))  # Adjust toward mean
-            spread = max(2, sigma)  # Spread based on volatility, minimum 2 for stable asset
+            sigma = max(atr_raw, 1)
+            fair_price = round(mu + self.theta * (mu - mid_price))
+            spread = max(1, sigma // 2)  # Tighter spread for stable asset
 
             # Calculate bid and ask prices
             bid_price = int(fair_price - spread)
@@ -235,16 +248,14 @@ class Trader:
             available_to_sell = min(self.max_position + pos, limit + pos)
             buy_volume = min(self.trade_size, available_to_buy)
             sell_volume = min(self.trade_size, available_to_sell)
-            if pos > 15:  # Skewed long
+            if pos > 20:  # Skewed long
                 sell_volume = min(self.trade_size * 2, available_to_sell)
                 buy_volume = min(self.trade_size // 2, available_to_buy)
-            elif pos < -15:  # Skewed short
+            elif pos < -20:  # Skewed short
                 buy_volume = min(self.trade_size * 2, available_to_buy)
                 sell_volume = min(self.trade_size // 2, available_to_sell)
 
-            # Place orders
-            buy_volume = min(buy_volume, sum([q for p, q in order_depth.buy_orders.items() if p >= bid_price]))
-            sell_volume = min(sell_volume, -sum([q for p, q in order_depth.sell_orders.items() if p <= ask_price]))
+            # Place orders (removed strict depth cap)
             if buy_volume > 0 and bid_price > 0:
                 result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", bid_price, buy_volume))
                 logger.print(f"RAINFOREST_RESIN: OU bid at {bid_price} for {buy_volume}, Fair: {fair_price}, Position: {pos}")
@@ -252,7 +263,7 @@ class Trader:
                 result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", ask_price, -sell_volume))
                 logger.print(f"RAINFOREST_RESIN: OU ask at {ask_price} for {sell_volume}, Fair: {fair_price}, Position: {pos}")
 
-        # Save trader_data (empty for simplicity)
+        # Save trader_data
         trader_data = json.dumps({})
         logger.flush(state, result, conversions, trader_data)
         return result, conversions, trader_data
