@@ -106,19 +106,17 @@ class Trader:
     def __init__(self):
         self.position = {"RAINFOREST_RESIN": 0, "KELP": 0}
         self.position_limits = {"RAINFOREST_RESIN": 50, "KELP": 50}
-        self.kelp_price_history = []
-        self.short_sma_period = 5   # Short-term moving average (changed from 10 to 5)
-        self.long_sma_period = 20   # Long-term moving average (changed from 50 to 20)
-        self.atr_period = 14        # Period for Average True Range
-        self.atr_history = []       # To calculate ATR
-        self.trade_size = 3         # Smaller trade size
-        self.max_position = 30      # Maximum position in either direction
-
-    def calculate_sma(self, prices, period):
-        if len(prices) < period:
-            return None
-        # Round the SMA to the nearest integer
-        return round(sum(prices[-period:]) / period)
+        # For KELP (volatile)
+        self.kelp_mid_price_history = []
+        self.kelp_atr_history = []
+        # For RAINFOREST_RESIN (stable, OU-based)
+        self.resin_mid_price_history = []
+        self.resin_atr_history = []
+        self.atr_period = 14  # Period for Average True Range
+        self.mean_period = 20  # Period for long-term mean (mu) in OU
+        self.theta = 0.1  # Mean reversion speed (fixed, adjustable)
+        self.trade_size = 3  # Base trade size for market-making
+        self.max_position = 30  # Maximum position in either direction
 
     def calculate_atr(self, high_low_history, period):
         if len(high_low_history) < period:
@@ -131,17 +129,22 @@ class Trader:
             tr_values.append(tr)
         if len(tr_values) < period - 1:
             return None
-        # Round the ATR to the nearest integer
         return round(sum(tr_values[-period+1:]) / (period - 1))
+
+    def calculate_mean(self, price_history, period):
+        if len(price_history) < period:
+            return None
+        return round(sum(price_history[-period:]) / period)
 
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
         result: dict[Symbol, list[Order]] = {product: [] for product in state.order_depths.keys()}
         conversions = 0
 
+        # Update positions from state
         for product in state.position:
             self.position[product] = state.position[product]
 
-        # --- KELP Trading Strategy (Trend-Following) ---
+        # --- KELP Trading Strategy (Market-Making for Volatile Asset) ---
         if "KELP" in state.order_depths:
             order_depth = state.order_depths["KELP"]
             best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
@@ -149,116 +152,51 @@ class Trader:
             pos = self.position["KELP"]
             limit = self.position_limits["KELP"]
 
-            # Update mid-price history (round to integer)
+            # Calculate mid-price and update history
             mid_price = round((best_bid + best_ask) / 2) if best_bid and best_ask < float("inf") else None
             if mid_price:
-                self.kelp_price_history.append(mid_price)
-                self.atr_history.append(mid_price)  # Using mid-price for ATR approximation
-                if len(self.kelp_price_history) > 100:  # Keep history manageable
-                    self.kelp_price_history.pop(0)
-                    self.atr_history.pop(0)
+                self.kelp_mid_price_history.append(mid_price)
+                self.kelp_atr_history.append(mid_price)
+                if len(self.kelp_mid_price_history) > 100:
+                    self.kelp_mid_price_history.pop(0)
+                    self.kelp_atr_history.pop(0)
 
-            # Load trader_data
-            trader_data_dict = json.loads(state.traderData) if state.traderData else {}
-            open_trades = trader_data_dict.get("open_trades", [])
-
-            # Check if any trades closed by comparing positions
-            updated_trades = []
-            for trade in open_trades:
-                direction = trade["direction"]
-                quantity = trade["quantity"]
-                initial_position = trade["initial_position"]
-                expected_position = initial_position + quantity if direction == "long" else initial_position - quantity
-                if pos != expected_position:
-                    logger.print(f"KELP: Trade closed, position updated from {expected_position} to {pos}")
-                else:
-                    updated_trades.append(trade)
-            open_trades = updated_trades
-
-            # Calculate SMAs and ATR
-            short_sma = self.calculate_sma(self.kelp_price_history, self.short_sma_period)
-            long_sma = self.calculate_sma(self.kelp_price_history, self.long_sma_period)
-            atr_raw = self.calculate_atr(self.atr_history, self.atr_period)
-
-            # Skip trading logic if we don't have enough data to compute SMAs or ATR
-            if short_sma is None or long_sma is None or atr_raw is None:
-                trader_data = json.dumps({"open_trades": open_trades})
+            # Calculate ATR for volatility adjustment
+            atr_raw = self.calculate_atr(self.kelp_atr_history, self.atr_period)
+            if atr_raw is None:
+                trader_data = json.dumps({})
                 logger.flush(state, result, conversions, trader_data)
                 return result, conversions, trader_data
-
-            # Ensure ATR is at least 2 (now that we know atr_raw is not None)
             atr = max(atr_raw, 2)
+            base_spread = max(2, atr // 2)
 
-            # Trend-Following Logic
-            if short_sma > long_sma and pos + self.trade_size <= self.max_position:
-                # Uptrend: Short SMA > Long SMA
-                # Buy at best_ask
-                result["KELP"].append(Order("KELP", best_ask, self.trade_size))
-                # Ensure target_price and stop_price are integers
-                target_price = int(best_ask + 4 * atr)  # Take-profit at 4x ATR (changed from 2x)
-                stop_price = int(best_ask - 3 * atr)    # Stop-loss at 3x ATR (changed from 1.5x)
-                open_trades.append({
-                    "direction": "long",
-                    "entry_price": best_ask,
-                    "quantity": self.trade_size,
-                    "initial_position": pos,
-                    "target_price": target_price,
-                    "stop_price": stop_price
-                })
-                logger.print(f"KELP: Trend Buy {self.trade_size} at {best_ask}, Short SMA: {short_sma}, Long SMA: {long_sma}")
+            # Calculate bid and ask prices
+            bid_price = int(mid_price - base_spread) if mid_price else best_bid
+            ask_price = int(mid_price + base_spread) if mid_price else best_ask
 
-            elif short_sma < long_sma and pos - self.trade_size >= -self.max_position:
-                # Downtrend: Short SMA < Long SMA
-                # Sell at best_bid
-                result["KELP"].append(Order("KELP", best_bid, -self.trade_size))
-                # Ensure target_price and stop_price are integers
-                target_price = int(best_bid - 4 * atr)  # Take-profit at 4x ATR (changed from 2x)
-                stop_price = int(best_bid + 3 * atr)    # Stop-loss at 3x ATR (changed from 1.5x)
-                open_trades.append({
-                    "direction": "short",
-                    "entry_price": best_bid,
-                    "quantity": self.trade_size,
-                    "initial_position": pos,
-                    "target_price": target_price,
-                    "stop_price": stop_price
-                })
-                logger.print(f"KELP: Trend Sell {self.trade_size} at {best_bid}, Short SMA: {short_sma}, Long SMA: {long_sma}")
+            # Inventory management
+            available_to_buy = min(self.max_position - pos, limit - pos)
+            available_to_sell = min(self.max_position + pos, limit + pos)
+            buy_volume = min(self.trade_size, available_to_buy)
+            sell_volume = min(self.trade_size, available_to_sell)
+            if pos > 15:  # Skewed long
+                sell_volume = min(self.trade_size * 2, available_to_sell)
+                buy_volume = min(self.trade_size // 2, available_to_buy)
+            elif pos < -15:  # Skewed short
+                buy_volume = min(self.trade_size * 2, available_to_buy)
+                sell_volume = min(self.trade_size // 2, available_to_sell)
 
-            # Manage open trades: Place take-profit, stop-loss, and trend-reversal orders
-            for trade in open_trades:
-                direction = trade["direction"]
-                quantity = trade["quantity"]
-                entry_price = trade["entry_price"]
-                target_price = trade["target_price"]
-                stop_price = trade["stop_price"]
+            # Place orders
+            buy_volume = min(buy_volume, sum([q for p, q in order_depth.buy_orders.items() if p >= bid_price]))
+            sell_volume = min(sell_volume, -sum([q for p, q in order_depth.sell_orders.items() if p <= ask_price]))
+            if buy_volume > 0 and bid_price > 0:
+                result["KELP"].append(Order("KELP", bid_price, buy_volume))
+                logger.print(f"KELP: Market-making bid at {bid_price} for {buy_volume}, ATR: {atr}, Position: {pos}")
+            if sell_volume > 0 and ask_price < float("inf"):
+                result["KELP"].append(Order("KELP", ask_price, -sell_volume))
+                logger.print(f"KELP: Market-making ask at {ask_price} for {sell_volume}, ATR: {atr}, Position: {pos}")
 
-                if direction == "long":
-                    # Take-profit: Sell at target_price (already an integer)
-                    result["KELP"].append(Order("KELP", target_price, -quantity))
-                    # Stop-loss: Sell at best_bid if price drops to or below stop_price
-                    if best_bid <= stop_price:
-                        result["KELP"].append(Order("KELP", best_bid, -quantity))
-                        logger.print(f"KELP: Stop-loss triggered at {best_bid} for long trade")
-                    # Trend reversal: Sell if trend turns down
-                    if short_sma < long_sma:
-                        result["KELP"].append(Order("KELP", best_bid, -quantity))
-                        logger.print(f"KELP: Trend reversal, closing long at {best_bid}")
-                elif direction == "short":
-                    # Take-profit: Buy at target_price (already an integer)
-                    result["KELP"].append(Order("KELP", target_price, quantity))
-                    # Stop-loss: Buy at best_ask if price rises to or above stop_price
-                    if best_ask >= stop_price:
-                        result["KELP"].append(Order("KELP", best_ask, quantity))
-                        logger.print(f"KELP: Stop-loss triggered at {best_ask} for short trade")
-                    # Trend reversal: Buy if trend turns up
-                    if short_sma > long_sma:
-                        result["KELP"].append(Order("KELP", best_ask, quantity))
-                        logger.print(f"KELP: Trend reversal, closing short at {best_ask}")
-
-            # Save trader_data
-            trader_data = json.dumps({"open_trades": open_trades})
-
-        # --- RAINFOREST_RESIN Trading Strategy (Unchanged) ---
+        # --- RAINFOREST_RESIN Trading Strategy (Market-Making with OU) ---
         if "RAINFOREST_RESIN" in state.order_depths:
             order_depth = state.order_depths["RAINFOREST_RESIN"]
             best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
@@ -266,21 +204,56 @@ class Trader:
             pos = self.position["RAINFOREST_RESIN"]
             limit = self.position_limits["RAINFOREST_RESIN"]
 
-            if best_ask < float("inf") and 9995 <= best_ask <= 10000:
-                available_to_buy = limit + pos
-                if available_to_buy > 0:
-                    volume = min(available_to_buy, -sum(order_depth.sell_orders.values()))
-                    if volume > 0:
-                        result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_ask, volume))
-                        logger.print(f"RAINFOREST_RESIN: Buy order at {best_ask} for {volume}")
-            if best_bid > 0 and 10000 <= best_bid <= 10005:
-                available_to_sell = limit - pos
-                if available_to_sell > 0:
-                    volume = min(available_to_sell, sum(order_depth.buy_orders.values()))
-                    if volume > 0:
-                        result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_bid, -volume))
-                        logger.print(f"RAINFOREST_RESIN: Sell order at {best_bid} for {volume}")
+            # Calculate mid-price and update history
+            mid_price = round((best_bid + best_ask) / 2) if best_bid and best_ask < float("inf") else None
+            if mid_price:
+                self.resin_mid_price_history.append(mid_price)
+                self.resin_atr_history.append(mid_price)
+                if len(self.resin_mid_price_history) > 100:
+                    self.resin_mid_price_history.pop(0)
+                    self.resin_atr_history.pop(0)
 
+            # Calculate OU parameters
+            mu = self.calculate_mean(self.resin_mid_price_history, self.mean_period) or 10000  # Default to 10000 if not enough data
+            atr_raw = self.calculate_atr(self.resin_atr_history, self.atr_period)
+            if atr_raw is None or mid_price is None:
+                trader_data = json.dumps({})
+                logger.flush(state, result, conversions, trader_data)
+                return result, conversions, trader_data
+            sigma = max(atr_raw, 1)  # Minimum volatility of 1 for stable asset
+
+            # Estimate fair price with OU mean-reversion (simplified discrete step)
+            fair_price = round(mu + self.theta * (mu - mid_price))  # Adjust toward mean
+            spread = max(2, sigma)  # Spread based on volatility, minimum 2 for stable asset
+
+            # Calculate bid and ask prices
+            bid_price = int(fair_price - spread)
+            ask_price = int(fair_price + spread)
+
+            # Inventory management
+            available_to_buy = min(self.max_position - pos, limit - pos)
+            available_to_sell = min(self.max_position + pos, limit + pos)
+            buy_volume = min(self.trade_size, available_to_buy)
+            sell_volume = min(self.trade_size, available_to_sell)
+            if pos > 15:  # Skewed long
+                sell_volume = min(self.trade_size * 2, available_to_sell)
+                buy_volume = min(self.trade_size // 2, available_to_buy)
+            elif pos < -15:  # Skewed short
+                buy_volume = min(self.trade_size * 2, available_to_buy)
+                sell_volume = min(self.trade_size // 2, available_to_sell)
+
+            # Place orders
+            buy_volume = min(buy_volume, sum([q for p, q in order_depth.buy_orders.items() if p >= bid_price]))
+            sell_volume = min(sell_volume, -sum([q for p, q in order_depth.sell_orders.items() if p <= ask_price]))
+            if buy_volume > 0 and bid_price > 0:
+                result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", bid_price, buy_volume))
+                logger.print(f"RAINFOREST_RESIN: OU bid at {bid_price} for {buy_volume}, Fair: {fair_price}, Position: {pos}")
+            if sell_volume > 0 and ask_price < float("inf"):
+                result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", ask_price, -sell_volume))
+                logger.print(f"RAINFOREST_RESIN: OU ask at {ask_price} for {sell_volume}, Fair: {fair_price}, Position: {pos}")
+
+        # Save trader_data (empty for simplicity)
+        trader_data = json.dumps({})
         logger.flush(state, result, conversions, trader_data)
         return result, conversions, trader_data
 
@@ -289,7 +262,6 @@ class Trader:
 
 def get_trader_instance() -> Trader:
     return Trader()
-
 
 def process_exchange_update(state: TradingState):
     trader = get_trader_instance()
