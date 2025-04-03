@@ -1,133 +1,259 @@
 import json
-from typing import Any
-from datamodel import TradingState, Order, Symbol, ProsperityEncoder
+from typing import Any, Dict, List
+from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState
 
+# Logger boilerplate required for the Prosperity Visualizer
 class Logger:
     def __init__(self) -> None:
         self.logs = ""
-        self.max_log_length = 3750  # Ensure logs do not exceed limits
+        self.max_log_length = 3750
 
     def print(self, *objects: Any, sep: str = " ", end: str = "\n") -> None:
-        """IMC-Compatible Logging: Capture logs as a single formatted string"""
-        log_entry = sep.join(map(str, objects)) + end
-        self.logs += log_entry
+        self.logs += sep.join(map(str, objects)) + end
 
-    def flush(self, state: TradingState, orders: dict[Symbol, list[Order]], conversions: int, trader_data: str) -> None:
-        """Flushes logs in the correct JSON format for IMC's visualizer"""
-        
-        log_data = json.dumps(
-            [
-                state.timestamp,
-                self.compress_orders(orders),
-                conversions,
-                trader_data,
-                self.truncate_logs(self.logs),
-            ],
-            cls=ProsperityEncoder,  # Ensure IMC format compatibility
-            separators=(",", ":")  # Minimize space usage
+    def flush(self, state: TradingState, orders: Dict[Symbol, List[Order]], conversions: int, trader_data: str) -> None:
+        base_length = len(
+            self.to_json(
+                [
+                    self.compress_state(state, ""),
+                    self.compress_orders(orders),
+                    conversions,
+                    "",
+                    "",
+                ]
+            )
         )
-        
-        print(log_data)  # Ensure correct format for IMC
-        self.logs = ""  # Reset logs after flushing
+        max_item_length = (self.max_log_length - base_length) // 3
 
-    def compress_orders(self, orders: dict[Symbol, list[Order]]) -> list[list[Any]]:
-        """Converts orders to a compact format"""
-        return [[order.symbol, order.price, order.quantity] for symbol_orders in orders.values() for order in symbol_orders]
+        print(
+            self.to_json(
+                [
+                    self.compress_state(
+                        state,
+                        self.truncate(state.traderData, max_item_length)
+                        if hasattr(state, "traderData")
+                        else ""
+                    ),
+                    self.compress_orders(orders),
+                    conversions,
+                    self.truncate(trader_data, max_item_length),
+                    self.truncate(self.logs, max_item_length),
+                ]
+            )
+        )
+        self.logs = ""
 
-    def truncate_logs(self, logs: str) -> str:
-        """Truncate logs to ensure they fit within the max length"""
-        return logs[: self.max_log_length - 3] + "..." if len(logs) > self.max_log_length else logs
+    def compress_state(self, state: TradingState, trader_data: str) -> List[Any]:
+        return [
+            state.timestamp,
+            trader_data,
+            self.compress_listings(state.listings),
+            self.compress_order_depths(state.order_depths),
+            self.compress_trades(state.own_trades),
+            self.compress_trades(state.market_trades),
+            state.position,
+            self.compress_observations(state.observations),
+        ]
+
+    def compress_listings(self, listings: Dict[Symbol, Listing]) -> List[List[Any]]:
+        return [[listing.symbol, listing.product, listing.denomination] for listing in listings.values()]
+
+    def compress_order_depths(self, order_depths: Dict[Symbol, OrderDepth]) -> Dict[Symbol, List[Any]]:
+        return {symbol: [order_depth.buy_orders, order_depth.sell_orders] for symbol, order_depth in order_depths.items()}
+
+    def compress_trades(self, trades: Dict[Symbol, List[Trade]]) -> List[List[Any]]:
+        return [
+            [
+                trade.symbol,
+                trade.price,
+                trade.quantity,
+                trade.buyer,
+                trade.seller,
+                trade.timestamp,
+            ]
+            for trade_list in trades.values()
+            for trade in trade_list
+        ]
+
+    def compress_observations(self, observations: Observation) -> List[Any]:
+        conversion_observations = {
+            product: [
+                observation.bidPrice,
+                observation.askPrice,
+                observation.transportFees,
+                observation.exportTariff,
+                observation.importTariff,
+                observation.sugarPrice,
+                observation.sunlightIndex,
+            ]
+            for product, observation in observations.conversionObservations.items()
+        }
+        return [observations.plainValueObservations, conversion_observations]
+
+    def compress_orders(self, orders: Dict[Symbol, List[Order]]) -> List[List[Any]]:
+        return [[order.symbol, order.price, order.quantity] for order_list in orders.values() for order in order_list]
+
+    def to_json(self, value: Any) -> str:
+        return json.dumps(value, cls=ProsperityEncoder, separators=(",", ":"))
+
+    def truncate(self, value: str, max_length: int) -> str:
+        return value if len(value) <= max_length else value[: max_length - 3] + "..."
+
 
 logger = Logger()
-
 
 class Trader:
     def __init__(self):
         self.position = {"RAINFOREST_RESIN": 0, "KELP": 0}
         self.position_limits = {"RAINFOREST_RESIN": 50, "KELP": 50}
-        self.kelp_price_history: List[float] = []
-        self.resistance = None
-        self.support = None
+        # For KELP (volatile)
+        self.kelp_mid_price_history = []
+        self.kelp_atr_history = []
+        self.last_trade_timestamp = 0  # Track last trade for liquidity check
+        # For RAINFOREST_RESIN (stable, OU-based)
+        self.resin_mid_price_history = []
+        self.resin_atr_history = []
+        self.atr_period = 14  # Period for Average True Range
+        self.mean_period = 20  # Period for long-term mean (mu) in OU
+        self.theta = 0.3  # Increased mean reversion speed
+        self.trade_size = 10  # Base trade size for maximum volume
 
-    def calculate_mid_price(self, order_depth: OrderDepth) -> float:
-        if order_depth.buy_orders and order_depth.sell_orders:
-            best_bid = max(order_depth.buy_orders.keys(), default=0)
-            best_ask = min(order_depth.sell_orders.keys(), default=float("inf"))
-            return (best_bid + best_ask) / 2
-        return None
+    def calculate_atr(self, high_low_history, period):
+        if len(high_low_history) < period:
+            return None
+        tr_values = []
+        for i in range(1, len(high_low_history)):
+            high = high_low_history[i]
+            low = high_low_history[i-1]
+            tr = abs(high - low)
+            tr_values.append(tr)
+        if len(tr_values) < period - 1:
+            return None
+        return round(sum(tr_values[-period+1:]) / (period - 1))
 
-    def run(self, state: TradingState) -> tuple[Dict[Symbol, List[Order]], int, str]:
-        result: Dict[Symbol, List[Order]] = {"RAINFOREST_RESIN": [], "KELP": []}
+    def calculate_mean(self, price_history, period):
+        if len(price_history) < period:
+            return None
+        return round(sum(price_history[-period:]) / period)
+
+    def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
+        result = {product: [] for product in state.order_depths.keys()}
         conversions = 0
 
-        for product in self.position:
-            if product in state.position:
-                self.position[product] = state.position[product]
+        # Update positions from state
+        for product in state.position:
+            self.position[product] = state.position[product]
 
-        # --- RAINFOREST RESIN SCALPING ---
+        # --- KELP Trading Strategy (Market-Making for Volatile Asset) ---
+        if "KELP" in state.order_depths:
+            order_depth = state.order_depths["KELP"]
+            best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
+            best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float("inf")
+            pos = self.position["KELP"]
+            limit = self.position_limits["KELP"]
+
+            # Calculate mid-price and update history
+            mid_price = round((best_bid + best_ask) / 2) if best_bid and best_ask < float("inf") else None
+            if mid_price:
+                self.kelp_mid_price_history.append(mid_price)
+                self.kelp_atr_history.append(mid_price)
+                if len(self.kelp_mid_price_history) > 50:
+                    self.kelp_mid_price_history.pop(0)
+                    self.kelp_atr_history.pop(0)
+
+            # Calculate ATR for volatility adjustment
+            atr_raw = self.calculate_atr(self.kelp_atr_history, self.atr_period)
+            if atr_raw is None:
+                trader_data = json.dumps({"last_trade_timestamp": self.last_trade_timestamp})
+                logger.flush(state, result, conversions, trader_data)
+                return result, conversions, trader_data
+            atr = max(atr_raw, 2)
+            base_spread = min(max(1, atr // 2), 5)  # Narrower spread with cap at 5
+
+            # Liquidity check: Halve spread if no trades in 500 timestamps
+            current_timestamp = state.timestamp
+            if current_timestamp - self.last_trade_timestamp > 500 and base_spread > 1:
+                base_spread = max(1, base_spread // 2)
+                logger.print(f"KELP: Liquidity check triggered, reduced spread to {base_spread}")
+
+            # Calculate bid and ask prices
+            bid_price = int(mid_price - base_spread) if mid_price else best_bid
+            ask_price = int(mid_price + base_spread) if mid_price else best_ask
+
+            # Inventory management (use full limit)
+            available_to_buy = limit - pos
+            available_to_sell = limit + pos
+
+            # Place orders with maximum volume
+            buy_volume = min(self.trade_size, available_to_buy)
+            sell_volume = min(self.trade_size, available_to_sell)
+            if buy_volume > 0 and bid_price > 0:
+                result["KELP"].append(Order("KELP", bid_price, buy_volume))
+                logger.print(f"KELP: Market-making bid at {bid_price} for {buy_volume}, ATR: {atr}, Position: {pos}")
+                self.last_trade_timestamp = current_timestamp
+            if sell_volume > 0 and ask_price < float("inf"):
+                result["KELP"].append(Order("KELP", ask_price, -sell_volume))
+                logger.print(f"KELP: Market-making ask at {ask_price} for {sell_volume}, ATR: {atr}, Position: {pos}")
+                self.last_trade_timestamp = current_timestamp
+
+        # --- RAINFOREST_RESIN Trading Strategy (Market-Making with OU) ---
         if "RAINFOREST_RESIN" in state.order_depths:
             order_depth = state.order_depths["RAINFOREST_RESIN"]
-            best_bid = max(order_depth.buy_orders.keys(), default=0)
-            best_ask = min(order_depth.sell_orders.keys(), default=float("inf"))
+            best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else 0
+            best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float("inf")
             pos = self.position["RAINFOREST_RESIN"]
             limit = self.position_limits["RAINFOREST_RESIN"]
 
-            if best_ask <= 10000 and best_ask >= 9995:
-                available_to_buy = limit - pos
-                volume = min(available_to_buy, -sum(order_depth.sell_orders.values()))
-                if volume > 0:
-                    result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_ask, volume))
-                    logger.print("Buy order placed", product="RAINFOREST_RESIN", price=best_ask, volume=volume)
+            # Calculate mid-price and update history
+            mid_price = round((best_bid + best_ask) / 2) if best_bid and best_ask < float("inf") else None
+            if mid_price:
+                self.resin_mid_price_history.append(mid_price)
+                self.resin_atr_history.append(mid_price)
+                if len(self.resin_mid_price_history) > 50:
+                    self.resin_mid_price_history.pop(0)
+                    self.resin_atr_history.pop(0)
 
-            if best_bid >= 10000 and best_bid <= 10005:
-                available_to_sell = limit + pos
-                volume = min(available_to_sell, sum(order_depth.buy_orders.values()))
-                if volume > 0:
-                    result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", best_bid, -volume))
-                    logger.print("Sell order placed", product="RAINFOREST_RESIN", price=best_bid, volume=volume)
+            # Calculate OU parameters
+            mu = self.calculate_mean(self.resin_mid_price_history, self.mean_period) or 10000
+            atr_raw = self.calculate_atr(self.resin_atr_history, self.atr_period)
+            if atr_raw is None or mid_price is None:
+                trader_data = json.dumps({"last_trade_timestamp": self.last_trade_timestamp})
+                logger.flush(state, result, conversions, trader_data)
+                return result, conversions, trader_data
+            sigma = max(atr_raw, 1)
+            fair_price = round(mu + self.theta * (mu - mid_price))
+            spread = max(1, sigma // 2)
 
-        # --- KELP BREAKOUT STRATEGY ---
-        if "KELP" in state.order_depths:
-            order_depth = state.order_depths["KELP"]
-            mid_price = self.calculate_mid_price(order_depth)
+            # Calculate bid and ask prices
+            bid_price = int(fair_price - spread)
+            ask_price = int(fair_price + spread)
 
-            if mid_price is not None:
-                self.kelp_price_history.append(mid_price)
-                if len(self.kelp_price_history) > 50:
-                    self.kelp_price_history.pop(0)
+            # Inventory management (use full limit)
+            available_to_buy = limit - pos
+            available_to_sell = limit + pos
 
-                best_bid = max(order_depth.buy_orders.keys(), default=0)
-                best_ask = min(order_depth.sell_orders.keys(), default=float("inf"))
-                pos = self.position["KELP"]
-                limit = self.position_limits["KELP"]
+            # Place orders with maximum volume
+            buy_volume = min(self.trade_size, available_to_buy)
+            sell_volume = min(self.trade_size, available_to_sell)
+            if buy_volume > 0 and bid_price > 0:
+                result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", bid_price, buy_volume))
+                logger.print(f"RAINFOREST_RESIN: OU bid at {bid_price} for {buy_volume}, Fair: {fair_price}, Position: {pos}")
+            if sell_volume > 0 and ask_price < float("inf"):
+                result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", ask_price, -sell_volume))
+                logger.print(f"RAINFOREST_RESIN: OU ask at {ask_price} for {sell_volume}, Fair: {fair_price}, Position: {pos}")
 
-                # Determine Support & Resistance dynamically
-                self.resistance = max(self.kelp_price_history, default=mid_price) + 5
-                self.support = min(self.kelp_price_history, default=mid_price) - 5
+        # Save trader_data
+        trader_data = json.dumps({"last_trade_timestamp": self.last_trade_timestamp})
+        logger.flush(state, result, conversions, trader_data)
+        return result, conversions, trader_data
 
-                # Buy near support, sell near resistance with 4-point TP
-                if best_ask <= self.support + 3:
-                    available_to_buy = limit - pos
-                    volume = min(available_to_buy, -sum(order_depth.sell_orders.values()))
-                    target_price = best_ask + 4
-                    if volume > 0 and max(order_depth.buy_orders.keys(), default=0) >= target_price:
-                        result["KELP"].append(Order("KELP", best_ask, volume))
-                        result["KELP"].append(Order("KELP", target_price, -volume))
-                        logger.print("Buy order placed", product="KELP", price=best_ask, volume=volume)
-
-                if best_bid >= self.resistance - 3:
-                    available_to_sell = limit + pos
-                    volume = min(available_to_sell, sum(order_depth.buy_orders.values()))
-                    target_price = best_bid - 4
-                    if volume > 0 and min(order_depth.sell_orders.keys(), default=float("inf")) <= target_price:
-                        result["KELP"].append(Order("KELP", best_bid, -volume))
-                        result["KELP"].append(Order("KELP", target_price, volume))
-                        logger.print("Sell order placed", product="KELP", price=best_bid, volume=volume)
-
-        # ✅ Ensure logs are JSON-formatted
-        logger.flush()
-        return result, conversions, ""
-
+    def toJSON(self, result: Any) -> str:
+        return json.dumps(result, cls=ProsperityEncoder)
 
 def get_trader_instance() -> Trader:
     return Trader()
+
+def process_exchange_update(state: TradingState):
+    trader = get_trader_instance()
+    result = trader.run(state)
+    return trader.toJSON(result)
