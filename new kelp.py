@@ -115,7 +115,7 @@ class Trader:
         self.resin_atr_history = []
         self.atr_period = 14  # Period for Average True Range
         self.mean_period = 20  # Period for long-term mean (mu) in OU
-        self.theta = 0.3  # Increased to capture more price movements
+        self.theta = 0.2 # Increased to capture more price movements
         self.trade_size = 15  # Increased base trade size for maximum volume
         # Profit tracking
         self.kelp_profit = 0
