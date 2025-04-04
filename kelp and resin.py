@@ -107,7 +107,7 @@ class Trader:
         self.position = {"RAINFOREST_RESIN": 0, "KELP": 0}
         self.position_limits = {"RAINFOREST_RESIN": 50, "KELP": 50}
         # KELP (volatile)
-        self.kelp_vw_mid_price_history = []  # Volume-weighted midprice history
+        self.kelp_vw_mid_price_history = []
         self.kelp_atr_history = []
         self.last_trade_timestamp = 0
         # RAINFOREST_RESIN (stable, OU-based)
@@ -115,9 +115,11 @@ class Trader:
         self.resin_atr_history = []
         self.atr_period = 14
         self.mean_period = 20
-        self.theta = 0.25  # Tuned for faster mean reversion
+        self.theta = 0.3  # Increased for faster mean reversion
         self.trade_size = 15
-        self.inventory_penalty = 0.1  # Penalty factor for positions far from zero
+        self.inventory_penalty = 0.05  # Reduced to allow more trading flexibility
+        self.kelp_profit = 0
+        self.resin_profit = 0
 
     def calculate_atr(self, price_history, period):
         if len(price_history) < period:
@@ -147,8 +149,7 @@ class Trader:
         return round((vw_bid + vw_ask) / 2)
 
     def calculate_hidden_fair_value(self, buy_orders: Dict[int, int], sell_orders: Dict[int, int]):
-        # Average of prices with large quantities
-        large_qty_threshold = self.trade_size
+        large_qty_threshold = self.trade_size // 2  # Lowered threshold to capture more recent large orders
         large_bids = [p for p, q in buy_orders.items() if q >= large_qty_threshold]
         large_asks = [p for p, q in sell_orders.items() if q >= large_qty_threshold]
         if not large_bids or not large_asks:
@@ -156,17 +157,32 @@ class Trader:
         return round((max(large_bids) + min(large_asks)) / 2)
 
     def calculate_inventory_adjustment(self, position, limit):
-        # Penalize positions far from zero
         distance_from_zero = abs(position) / limit
         return 1 - self.inventory_penalty * distance_from_zero
+
+    def update_profit(self, state: TradingState):
+        for symbol, trades in state.own_trades.items():
+            for trade in trades:
+                if trade.timestamp == state.timestamp:  # Only count new trades
+                    if symbol == "KELP":
+                        if trade.buyer == "":  # We sold
+                            self.kelp_profit += trade.quantity * trade.price
+                        elif trade.seller == "":  # We bought
+                            self.kelp_profit -= trade.quantity * trade.price
+                    elif symbol == "RAINFOREST_RESIN":
+                        if trade.buyer == "":  # We sold
+                            self.resin_profit += trade.quantity * trade.price
+                        elif trade.seller == "":  # We bought
+                            self.resin_profit -= trade.quantity * trade.price
 
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
         result = {product: [] for product in state.order_depths.keys()}
         conversions = 0
 
-        # Update positions from state
+        # Update positions and profits
         for product in state.position:
             self.position[product] = state.position[product]
+        self.update_profit(state)
 
         # --- KELP Trading Strategy (Market-Making for Volatile Asset) ---
         if "KELP" in state.order_depths:
@@ -188,17 +204,21 @@ class Trader:
             # Calculate ATR and dynamic spread
             atr_raw = self.calculate_atr(self.kelp_atr_history, self.atr_period)
             if atr_raw is None or vw_mid_price is None:
-                trader_data = json.dumps({"last_trade_timestamp": self.last_trade_timestamp})
+                trader_data = json.dumps({
+                    "last_trade_timestamp": self.last_trade_timestamp,
+                    "kelp_profit": self.kelp_profit,
+                    "resin_profit": self.resin_profit
+                })
                 logger.flush(state, result, conversions, trader_data)
                 return result, conversions, trader_data
             atr = max(atr_raw, 2)
             market_depth = len(order_depth.buy_orders) + len(order_depth.sell_orders)
-            base_spread = max(1, atr // (2 if market_depth > 10 else 3))  # Tighter spread with higher depth
+            base_spread = max(2, atr // (1 if market_depth > 15 else 2))  # Tighter spread, minimum 2
 
             # Liquidity check
             current_timestamp = state.timestamp
-            if current_timestamp - self.last_trade_timestamp > 300 and base_spread > 1:
-                base_spread = max(1, base_spread // 2)
+            if current_timestamp - self.last_trade_timestamp > 300 and base_spread > 2:
+                base_spread = max(2, base_spread // 2)
                 logger.print(f"KELP: Liquidity check triggered, reduced spread to {base_spread}")
 
             # Inventory adjustment
@@ -242,12 +262,16 @@ class Trader:
             mu = self.calculate_mean(self.resin_mid_price_history, self.mean_period) or (hidden_fair_value or 10000)
             atr_raw = self.calculate_atr(self.resin_atr_history, self.atr_period)
             if atr_raw is None or mid_price is None:
-                trader_data = json.dumps({"last_trade_timestamp": self.last_trade_timestamp})
+                trader_data = json.dumps({
+                    "last_trade_timestamp": self.last_trade_timestamp,
+                    "kelp_profit": self.kelp_profit,
+                    "resin_profit": self.resin_profit
+                })
                 logger.flush(state, result, conversions, trader_data)
                 return result, conversions, trader_data
             sigma = max(atr_raw, 1)
             fair_price = round(mu + self.theta * (mu - mid_price))
-            spread = max(1, sigma // 2)
+            spread = max(1, sigma // 3)  # Tighter spread for stable asset
 
             # Inventory adjustment
             inventory_factor = self.calculate_inventory_adjustment(pos, limit)
@@ -266,12 +290,14 @@ class Trader:
                 result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", ask_price, -sell_volume))
                 logger.print(f"RESIN: Ask at {ask_price} for {sell_volume}, Fair: {fair_price}, Pos: {pos}")
 
-        # Enhanced trader_data for multi-round tuning
+        # Enhanced trader_data
         trader_data = json.dumps({
             "last_trade_timestamp": self.last_trade_timestamp,
             "kelp_atr": atr_raw if "KELP" in state.order_depths else None,
             "resin_theta": self.theta,
-            "resin_mu": mu if "RAINFOREST_RESIN" in state.order_depths else None
+            "resin_mu": mu if "RAINFOREST_RESIN" in state.order_depths else None,
+            "kelp_profit": self.kelp_profit,
+            "resin_profit": self.resin_profit
         })
         logger.flush(state, result, conversions, trader_data)
         return result, conversions, trader_data
