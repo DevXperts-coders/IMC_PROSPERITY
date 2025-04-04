@@ -115,9 +115,9 @@ class Trader:
         self.resin_atr_history = []
         self.atr_period = 14
         self.mean_period = 20
-        self.theta = 0.3  # Increased for faster mean reversion
+        self.theta = 0.2  # Reduced for more stable mean reversion
         self.trade_size = 15
-        self.inventory_penalty = 0.05  # Reduced to allow more trading flexibility
+        self.inventory_penalty = 0.05  # Only applied to RAINFOREST_RESIN
         self.kelp_profit = 0
         self.resin_profit = 0
 
@@ -140,16 +140,20 @@ class Trader:
         return round(sum(price_history[-period:]) / period)
 
     def calculate_vw_mid_price(self, buy_orders: Dict[int, int], sell_orders: Dict[int, int]):
-        total_buy_volume = sum(buy_orders.values())
-        total_sell_volume = sum(sell_orders.values())
+        # Use top 3 price levels for a more robust estimate
+        top_n = 3
+        sorted_bids = sorted(buy_orders.items(), key=lambda x: x[0], reverse=True)[:top_n]
+        sorted_asks = sorted(sell_orders.items(), key=lambda x: x[0])[:top_n]
+        total_buy_volume = sum(qty for _, qty in sorted_bids)
+        total_sell_volume = sum(qty for _, qty in sorted_asks)
         if total_buy_volume == 0 or total_sell_volume == 0:
             return None
-        vw_bid = sum(price * qty for price, qty in buy_orders.items()) / total_buy_volume
-        vw_ask = sum(price * qty for price, qty in sell_orders.items()) / total_sell_volume
+        vw_bid = sum(price * qty for price, qty in sorted_bids) / total_buy_volume
+        vw_ask = sum(price * qty for price, qty in sorted_asks) / total_sell_volume
         return round((vw_bid + vw_ask) / 2)
 
     def calculate_hidden_fair_value(self, buy_orders: Dict[int, int], sell_orders: Dict[int, int]):
-        large_qty_threshold = self.trade_size // 2  # Lowered threshold to capture more recent large orders
+        large_qty_threshold = self.trade_size  # Increased threshold for stability
         large_bids = [p for p, q in buy_orders.items() if q >= large_qty_threshold]
         large_asks = [p for p, q in sell_orders.items() if q >= large_qty_threshold]
         if not large_bids or not large_asks:
@@ -166,14 +170,14 @@ class Trader:
                 if trade.timestamp == state.timestamp:  # Only count new trades
                     if symbol == "KELP":
                         if trade.buyer == "":  # We sold
-                            self.kelp_profit += trade.quantity * trade.price
+                            self.kelp_profit += trade.quantity * (trade.price - vw_mid_price) if 'vw_mid_price' in locals() else 0
                         elif trade.seller == "":  # We bought
-                            self.kelp_profit -= trade.quantity * trade.price
+                            self.kelp_profit += trade.quantity * (vw_mid_price - trade.price) if 'vw_mid_price' in locals() else 0
                     elif symbol == "RAINFOREST_RESIN":
                         if trade.buyer == "":  # We sold
-                            self.resin_profit += trade.quantity * trade.price
+                            self.resin_profit += trade.quantity * (trade.price - fair_price) if 'fair_price' in locals() else 0
                         elif trade.seller == "":  # We bought
-                            self.resin_profit -= trade.quantity * trade.price
+                            self.resin_profit += trade.quantity * (fair_price - trade.price) if 'fair_price' in locals() else 0
 
     def run(self, state: TradingState) -> tuple[dict[Symbol, list[Order]], int, str]:
         result = {product: [] for product in state.order_depths.keys()}
@@ -211,20 +215,19 @@ class Trader:
                 })
                 logger.flush(state, result, conversions, trader_data)
                 return result, conversions, trader_data
-            atr = max(atr_raw, 2)
+            atr = max(atr_raw, 1)
             market_depth = len(order_depth.buy_orders) + len(order_depth.sell_orders)
-            base_spread = max(2, atr // (1 if market_depth > 15 else 2))  # Tighter spread, minimum 2
+            base_spread = max(1, atr // (1 if market_depth > 20 else 2))  # Further tightened spread
 
             # Liquidity check
             current_timestamp = state.timestamp
-            if current_timestamp - self.last_trade_timestamp > 300 and base_spread > 2:
-                base_spread = max(2, base_spread // 2)
+            if current_timestamp - self.last_trade_timestamp > 300 and base_spread > 1:
+                base_spread = 1
                 logger.print(f"KELP: Liquidity check triggered, reduced spread to {base_spread}")
 
-            # Inventory adjustment
-            inventory_factor = self.calculate_inventory_adjustment(pos, limit)
-            bid_price = int(vw_mid_price - base_spread * inventory_factor)
-            ask_price = int(vw_mid_price + base_spread * inventory_factor)
+            # No inventory adjustment for KELP to maximize trading
+            bid_price = int(vw_mid_price - base_spread)
+            ask_price = int(vw_mid_price + base_spread)
 
             # Place orders
             available_to_buy = limit - pos
@@ -271,7 +274,7 @@ class Trader:
                 return result, conversions, trader_data
             sigma = max(atr_raw, 1)
             fair_price = round(mu + self.theta * (mu - mid_price))
-            spread = max(1, sigma // 3)  # Tighter spread for stable asset
+            spread = max(1, sigma // 2)  # Slightly wider spread to reduce overtrading
 
             # Inventory adjustment
             inventory_factor = self.calculate_inventory_adjustment(pos, limit)
