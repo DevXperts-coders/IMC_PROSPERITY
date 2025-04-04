@@ -117,7 +117,9 @@ class Trader:
         self.mean_period = 20  # Period for long-term mean (mu) in OU
         self.theta = 0.2  # Increased mean reversion speed
         self.trade_size = 15  # Increased base trade size for maximum volume
-
+        self.kelp_profit = 0
+        self.resin_profit = 0
+        self.inventory_penalty = 0.05
     def calculate_atr(self, high_low_history, period):
         if len(high_low_history) < period:
             return None
