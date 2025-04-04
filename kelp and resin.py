@@ -114,11 +114,11 @@ class Trader:
         # For RAINFOREST_RESIN (stable, OU-based)
         self.resin_mid_price_history = []
         self.resin_atr_history = []
-        self.atr_period = 10  # Reduced for more responsive ATR
+        self.atr_period = 10  # Period for Average True Range
         self.mean_period = 20  # Period for long-term mean (mu) in OU
-        self.theta = 0.4  # Increased mean reversion speed
-        self.base_trade_size = 15  # Base trade size
-        self.boosted_trade_size = 20  # Boosted trade size for inactivity
+        self.theta = 0.3  # Reduced mean reversion speed
+        self.base_trade_size = 10  # Reduced base trade size
+        self.boosted_trade_size = 15  # Reduced boosted trade size
 
     def calculate_atr(self, high_low_history, period):
         if len(high_low_history) < period:
@@ -154,6 +154,11 @@ class Trader:
             pos = self.position["KELP"]
             limit = self.position_limits["KELP"]
 
+            # Check market depth
+            bid_depth = sum(order_depth.buy_orders.values()) if order_depth.buy_orders else 0
+            ask_depth = sum(abs(q) for q in order_depth.sell_orders.values()) if order_depth.sell_orders else 0
+            min_depth = 5  # Minimum depth to place orders
+
             # Calculate mid-price and update history
             mid_price = round((best_bid + best_ask) / 2) if best_bid and best_ask < float("inf") else None
             if mid_price:
@@ -173,12 +178,12 @@ class Trader:
                 logger.flush(state, result, conversions, trader_data)
                 return result, conversions, trader_data
             atr = max(atr_raw, 2)
-            base_spread = max(0.5, atr // 4)  # Even tighter spread with minimum 0.5
+            base_spread = max(1, atr // 3)  # Slightly wider spread
 
-            # Liquidity check: Halve spread if no trades in 200 timestamps
+            # Liquidity check: Halve spread if no trades in 300 timestamps
             current_timestamp = state.timestamp
-            if current_timestamp - self.last_trade_timestamp_kelp > 200 and base_spread > 0.5:
-                base_spread = max(0.5, base_spread // 2)
+            if current_timestamp - self.last_trade_timestamp_kelp > 300 and base_spread > 1:
+                base_spread = max(1, base_spread // 2)
                 logger.print(f"KELP: Liquidity check triggered, reduced spread to {base_spread}")
 
             # Dynamic trade size: Boost if no trades for 500 timestamps
@@ -195,14 +200,14 @@ class Trader:
             available_to_buy = limit - pos
             available_to_sell = limit + pos
 
-            # Place orders with dynamic volume
+            # Place orders only if sufficient market depth
             buy_volume = min(trade_size, available_to_buy)
             sell_volume = min(trade_size, available_to_sell)
-            if buy_volume > 0 and bid_price > 0:
+            if buy_volume > 0 and bid_price > 0 and bid_depth >= min_depth:
                 result["KELP"].append(Order("KELP", bid_price, buy_volume))
                 logger.print(f"KELP: Market-making bid at {bid_price} for {buy_volume}, ATR: {atr}, Position: {pos}")
                 self.last_trade_timestamp_kelp = current_timestamp
-            if sell_volume > 0 and ask_price < float("inf"):
+            if sell_volume > 0 and ask_price < float("inf") and ask_depth >= min_depth:
                 result["KELP"].append(Order("KELP", ask_price, -sell_volume))
                 logger.print(f"KELP: Market-making ask at {ask_price} for {sell_volume}, ATR: {atr}, Position: {pos}")
                 self.last_trade_timestamp_kelp = current_timestamp
@@ -214,6 +219,11 @@ class Trader:
             best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else float("inf")
             pos = self.position["RAINFOREST_RESIN"]
             limit = self.position_limits["RAINFOREST_RESIN"]
+
+            # Check market depth
+            bid_depth = sum(order_depth.buy_orders.values()) if order_depth.buy_orders else 0
+            ask_depth = sum(abs(q) for q in order_depth.sell_orders.values()) if order_depth.sell_orders else 0
+            min_depth = 5  # Minimum depth to place orders
 
             # Calculate mid-price and update history
             mid_price = round((best_bid + best_ask) / 2) if best_bid and best_ask < float("inf") else None
@@ -236,7 +246,7 @@ class Trader:
                 return result, conversions, trader_data
             sigma = max(atr_raw, 1)
             fair_price = round(mu + self.theta * (mu - mid_price))
-            spread = max(1, sigma // 3)  # Tighter spread to increase trades
+            spread = max(1, sigma // 2)  # Wider spread to reduce overtrading
 
             # Dynamic trade size: Boost if no trades for 500 timestamps
             trade_size = self.base_trade_size
@@ -252,14 +262,14 @@ class Trader:
             available_to_buy = limit - pos
             available_to_sell = limit + pos
 
-            # Place orders with dynamic volume
+            # Place orders only if sufficient market depth
             buy_volume = min(trade_size, available_to_buy)
             sell_volume = min(trade_size, available_to_sell)
-            if buy_volume > 0 and bid_price > 0:
+            if buy_volume > 0 and bid_price > 0 and bid_depth >= min_depth:
                 result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", bid_price, buy_volume))
                 logger.print(f"RAINFOREST_RESIN: OU bid at {bid_price} for {buy_volume}, Fair: {fair_price}, Position: {pos}")
                 self.last_trade_timestamp_resin = current_timestamp
-            if sell_volume > 0 and ask_price < float("inf"):
+            if sell_volume > 0 and ask_price < float("inf") and ask_depth >= min_depth:
                 result["RAINFOREST_RESIN"].append(Order("RAINFOREST_RESIN", ask_price, -sell_volume))
                 logger.print(f"RAINFOREST_RESIN: OU ask at {ask_price} for {sell_volume}, Fair: {fair_price}, Position: {pos}")
                 self.last_trade_timestamp_resin = current_timestamp
